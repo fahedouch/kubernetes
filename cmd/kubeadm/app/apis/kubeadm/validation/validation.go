@@ -25,21 +25,25 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/pkg/errors"
-	"github.com/spf13/pflag"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/apimachinery/pkg/util/validation/field"
-	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
-	bootstraputil "k8s.io/cluster-bootstrap/token/util"
+	bootstraptokenv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/bootstraptoken/v1"
 	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1beta2 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
 	kubeadmcmdoptions "k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/features"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
+
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
+	bootstraputil "k8s.io/cluster-bootstrap/token/util"
+	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
+
+	"github.com/pkg/errors"
+	"github.com/spf13/pflag"
 )
 
 // ValidateInitConfiguration validates an InitConfiguration object and collects all encountered errors
@@ -57,6 +61,7 @@ func ValidateInitConfiguration(c *kubeadm.InitConfiguration) field.ErrorList {
 // ValidateClusterConfiguration validates an ClusterConfiguration object and collects all encountered errors
 func ValidateClusterConfiguration(c *kubeadm.ClusterConfiguration) field.ErrorList {
 	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, ValidateDNS(&c.DNS, field.NewPath("dns"))...)
 	allErrs = append(allErrs, ValidateNetworking(c, field.NewPath("networking"))...)
 	allErrs = append(allErrs, ValidateAPIServer(&c.APIServer, field.NewPath("apiServer"))...)
 	allErrs = append(allErrs, ValidateAbsolutePath(c.CertificatesDir, field.NewPath("certificatesDir"))...)
@@ -201,7 +206,7 @@ func ValidateDiscoveryKubeConfigPath(discoveryFile string, fldPath *field.Path) 
 }
 
 // ValidateBootstrapTokens validates a slice of BootstrapToken objects
-func ValidateBootstrapTokens(bts []kubeadm.BootstrapToken, fldPath *field.Path) field.ErrorList {
+func ValidateBootstrapTokens(bts []bootstraptokenv1.BootstrapToken, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	for i, bt := range bts {
 		btPath := fldPath.Child(fmt.Sprintf("%d", i))
@@ -399,6 +404,12 @@ func ValidateIPNetFromString(subnetStr string, minAddrs int64, isDualStack bool,
 		if numAddresses < minAddrs {
 			allErrs = append(allErrs, field.Invalid(fldPath, s.String(), fmt.Sprintf("subnet with %d address(es) is too small, the minimum is %d", numAddresses, minAddrs)))
 		}
+
+		// Warn when the subnet is in site-local range - i.e. contains addresses that belong to fec0::/10
+		_, siteLocalNet, _ := net.ParseCIDR("fec0::/10")
+		if siteLocalNet.Contains(s.IP) || s.Contains(siteLocalNet.IP) {
+			klog.Warningf("the subnet %v contains IPv6 site-local addresses that belong to fec0::/10 which has been deprecated by rfc3879", s)
+		}
 	}
 	return allErrs
 }
@@ -454,7 +465,7 @@ func ValidatePodSubnetNodeMask(subnetStr string, c *kubeadm.ClusterConfiguration
 func getClusterNodeMask(c *kubeadm.ClusterConfiguration, isIPv6 bool) (int, error) {
 	// defaultNodeMaskCIDRIPv4 is default mask size for IPv4 node cidr for use by the controller manager
 	const defaultNodeMaskCIDRIPv4 = 24
-	// DefaultNodeMaskCIDRIPv6 is default mask size for IPv6 node cidr for use by the controller manager
+	// defaultNodeMaskCIDRIPv6 is default mask size for IPv6 node cidr for use by the controller manager
 	const defaultNodeMaskCIDRIPv6 = 64
 	var maskSize int
 	var maskArg string
@@ -484,6 +495,17 @@ func getClusterNodeMask(c *kubeadm.ClusterConfiguration, isIPv6 bool) (int, erro
 	return maskSize, nil
 }
 
+// ValidateDNS validates the DNS object and collects all encountered errors
+// TODO: Remove with v1beta2 https://github.com/kubernetes/kubeadm/issues/2459
+func ValidateDNS(dns *kubeadm.DNS, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	const kubeDNSType = "kube-dns"
+	if dns.Type == kubeDNSType {
+		allErrs = append(allErrs, field.Invalid(fldPath, dns.Type, fmt.Sprintf("DNS type %q is no longer supported", kubeDNSType)))
+	}
+	return allErrs
+}
+
 // ValidateNetworking validates networking configuration
 func ValidateNetworking(c *kubeadm.ClusterConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
@@ -501,8 +523,10 @@ func ValidateNetworking(c *kubeadm.ClusterConfiguration, fldPath *field.Path) fi
 	}
 	if len(c.Networking.PodSubnet) != 0 {
 		allErrs = append(allErrs, ValidateIPNetFromString(c.Networking.PodSubnet, constants.MinimumAddressesInPodSubnet, isDualStack, field.NewPath("podSubnet"))...)
-		// Pod subnet was already validated, we need to validate now against the node-mask
-		allErrs = append(allErrs, ValidatePodSubnetNodeMask(c.Networking.PodSubnet, c, field.NewPath("podSubnet"))...)
+		if c.ControllerManager.ExtraArgs["allocate-node-cidrs"] != "false" {
+			// Pod subnet was already validated, we need to validate now against the node-mask
+			allErrs = append(allErrs, ValidatePodSubnetNodeMask(c.Networking.PodSubnet, c, field.NewPath("podSubnet"))...)
+		}
 	}
 	return allErrs
 }
@@ -539,17 +563,18 @@ func ValidateMixedArguments(flag *pflag.FlagSet) error {
 }
 
 func isAllowedFlag(flagName string) bool {
-	knownFlags := sets.NewString(kubeadmcmdoptions.CfgPath,
+	allowedFlags := sets.NewString(kubeadmcmdoptions.CfgPath,
 		kubeadmcmdoptions.IgnorePreflightErrors,
 		kubeadmcmdoptions.DryRun,
 		kubeadmcmdoptions.KubeconfigPath,
 		kubeadmcmdoptions.NodeName,
-		kubeadmcmdoptions.NodeCRISocket,
 		kubeadmcmdoptions.KubeconfigDir,
 		kubeadmcmdoptions.UploadCerts,
 		kubeadmcmdoptions.Patches,
-		"print-join-command", "rootfs", "v")
-	if knownFlags.Has(flagName) {
+		// TODO: https://github.com/kubernetes/kubeadm/issues/2046 remove in 1.23
+		kubeadmcmdoptions.ExperimentalPatches,
+		"print-join-command", "rootfs", "v", "log-file")
+	if allowedFlags.Has(flagName) {
 		return true
 	}
 	return strings.HasPrefix(flagName, "skip-")
@@ -619,7 +644,7 @@ func ValidateSocketPath(socket string, fldPath *field.Path) field.ErrorList {
 		if !filepath.IsAbs(u.Path) {
 			return append(allErrs, field.Invalid(fldPath, socket, fmt.Sprintf("path is not absolute: %s", socket)))
 		}
-	} else if u.Scheme != kubeadmapiv1beta2.DefaultUrlScheme {
+	} else if u.Scheme != kubeadmapiv1.DefaultUrlScheme {
 		return append(allErrs, field.Invalid(fldPath, socket, fmt.Sprintf("URL scheme %s is not supported", u.Scheme)))
 	}
 

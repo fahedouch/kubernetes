@@ -116,9 +116,11 @@ func (cfg *Config) Complete() CompletedConfig {
 	}
 
 	c.GenericConfig.EnableDiscovery = false
-	c.GenericConfig.Version = &version.Info{
-		Major: "0",
-		Minor: "1",
+	if c.GenericConfig.Version == nil {
+		c.GenericConfig.Version = &version.Info{
+			Major: "0",
+			Minor: "1",
+		}
 	}
 
 	return CompletedConfig{&c}
@@ -135,9 +137,15 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 		GenericAPIServer: genericServer,
 	}
 
+	// used later  to filter the served resource by those that have expired.
+	resourceExpirationEvaluator, err := genericapiserver.NewResourceExpirationEvaluator(*c.GenericConfig.Version)
+	if err != nil {
+		return nil, err
+	}
+
 	apiResourceConfig := c.GenericConfig.MergedResourceConfig
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(apiextensions.GroupName, Scheme, metav1.ParameterCodec, Codecs)
-	if apiResourceConfig.VersionEnabled(v1beta1.SchemeGroupVersion) {
+	if resourceExpirationEvaluator.ShouldServeForVersion(1, 22) && apiResourceConfig.VersionEnabled(v1beta1.SchemeGroupVersion) {
 		storage := map[string]rest.Storage{}
 		// customresourcedefinitions
 		customResourceDefinitionStorage, err := customresourcedefinition.NewREST(Scheme, c.GenericConfig.RESTOptionsGetter)

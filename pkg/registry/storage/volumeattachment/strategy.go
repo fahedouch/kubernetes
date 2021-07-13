@@ -31,6 +31,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/storage"
 	"k8s.io/kubernetes/pkg/apis/storage/validation"
 	"k8s.io/kubernetes/pkg/features"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 )
 
 // volumeAttachmentStrategy implements behavior for VolumeAttachment objects
@@ -45,6 +46,18 @@ var Strategy = volumeAttachmentStrategy{legacyscheme.Scheme, names.SimpleNameGen
 
 func (volumeAttachmentStrategy) NamespaceScoped() bool {
 	return false
+}
+
+// GetResetFields returns the set of fields that get reset by the strategy
+// and should not be modified by the user.
+func (volumeAttachmentStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
+	fields := map[fieldpath.APIVersion]*fieldpath.Set{
+		"storage.k8s.io/v1": fieldpath.NewSet(
+			fieldpath.MakePathOrDie("status"),
+		),
+	}
+
+	return fields
 }
 
 // ResetBeforeCreate clears the Status field which is not allowed to be set by end users on creation.
@@ -91,6 +104,11 @@ func (volumeAttachmentStrategy) Validate(ctx context.Context, obj runtime.Object
 	return errs
 }
 
+// WarningsOnCreate returns warnings for the creation of the given object.
+func (volumeAttachmentStrategy) WarningsOnCreate(ctx context.Context, obj runtime.Object) []string {
+	return nil
+}
+
 // Canonicalize normalizes the object after validation.
 func (volumeAttachmentStrategy) Canonicalize(obj runtime.Object) {
 }
@@ -130,6 +148,11 @@ func (volumeAttachmentStrategy) ValidateUpdate(ctx context.Context, obj, old run
 	return append(errorList, validation.ValidateVolumeAttachmentUpdate(newVolumeAttachmentObj, oldVolumeAttachmentObj)...)
 }
 
+// WarningsOnUpdate returns warnings for the given update.
+func (volumeAttachmentStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
+	return nil
+}
+
 func (volumeAttachmentStrategy) AllowUnconditionalUpdate() bool {
 	return false
 }
@@ -142,6 +165,19 @@ type volumeAttachmentStatusStrategy struct {
 // StatusStrategy is the default logic that applies when creating and updating
 // VolumeAttachmentStatus subresource via the REST API.
 var StatusStrategy = volumeAttachmentStatusStrategy{Strategy}
+
+// GetResetFields returns the set of fields that get reset by the strategy
+// and should not be modified by the user.
+func (volumeAttachmentStatusStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
+	fields := map[fieldpath.APIVersion]*fieldpath.Set{
+		"storage.k8s.io/v1": fieldpath.NewSet(
+			fieldpath.MakePathOrDie("metadata"),
+			fieldpath.MakePathOrDie("spec"),
+		),
+	}
+
+	return fields
+}
 
 // PrepareForUpdate sets the Status fields which is not allowed to be set by an end user updating a VolumeAttachment
 func (volumeAttachmentStatusStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {

@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	goopenapispec "github.com/go-openapi/spec"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 
 	apiextensionshelpers "k8s.io/apiextensions-apiserver/pkg/apihelpers"
 	apiextensionsinternal "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -129,7 +129,7 @@ type crdHandler struct {
 	// staticOpenAPISpec is used as a base for the schema of CR's for the
 	// purpose of managing fields, it is how CR handlers get the structure
 	// of TypeMeta and ObjectMeta
-	staticOpenAPISpec *goopenapispec.Swagger
+	staticOpenAPISpec *spec.Swagger
 
 	// The limit on the request size that would be accepted and decoded in a write request
 	// 0 means no limit.
@@ -184,7 +184,7 @@ func NewCustomResourceDefinitionHandler(
 	authorizer authorizer.Authorizer,
 	requestTimeout time.Duration,
 	minRequestTimeout time.Duration,
-	staticOpenAPISpec *goopenapispec.Swagger,
+	staticOpenAPISpec *spec.Swagger,
 	maxRequestBodyBytes int64) (*crdHandler, error) {
 	ret := &crdHandler{
 		versionDiscoveryHandler: versionDiscoveryHandler,
@@ -366,7 +366,7 @@ func (r *crdHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case subresource == "scale" && subresources != nil && subresources.Scale != nil:
 		handlerFunc = r.serveScale(w, req, requestInfo, crdInfo, terminating, supportedTypes)
 	case len(subresource) == 0:
-		handlerFunc = r.serveResource(w, req, requestInfo, crdInfo, terminating, supportedTypes)
+		handlerFunc = r.serveResource(w, req, requestInfo, crdInfo, crd, terminating, supportedTypes)
 	default:
 		responsewriters.ErrorNegotiated(
 			apierrors.NewNotFound(schema.GroupResource{Group: requestInfo.APIGroup, Resource: requestInfo.Resource}, requestInfo.Name),
@@ -382,7 +382,7 @@ func (r *crdHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (r *crdHandler) serveResource(w http.ResponseWriter, req *http.Request, requestInfo *apirequest.RequestInfo, crdInfo *crdInfo, terminating bool, supportedTypes []string) http.HandlerFunc {
+func (r *crdHandler) serveResource(w http.ResponseWriter, req *http.Request, requestInfo *apirequest.RequestInfo, crdInfo *crdInfo, crd *apiextensionsv1.CustomResourceDefinition, terminating bool, supportedTypes []string) http.HandlerFunc {
 	requestScope := crdInfo.requestScopes[requestInfo.APIVersion]
 	storage := crdInfo.storages[requestInfo.APIVersion].CustomResource
 
@@ -396,6 +396,13 @@ func (r *crdHandler) serveResource(w http.ResponseWriter, req *http.Request, req
 		forceWatch := true
 		return handlers.ListResource(storage, storage, requestScope, forceWatch, r.minRequestTimeout)
 	case "create":
+		// we want to track recently created CRDs so that in HA environments we don't have server A allow a create and server B
+		// not have observed the established, so a followup get,update,delete results in a 404. We've observed about 800ms
+		// delay in some CI environments.  Two seconds looks long enough and reasonably short for hot retriers.
+		justCreated := time.Since(apiextensionshelpers.FindCRDCondition(crd, apiextensionsv1.Established).LastTransitionTime.Time) < 2*time.Second
+		if justCreated {
+			time.Sleep(2 * time.Second)
+		}
 		if terminating {
 			err := apierrors.NewMethodNotSupported(schema.GroupResource{Group: requestInfo.APIGroup, Resource: requestInfo.Resource}, requestInfo.Verb)
 			err.ErrStatus.Message = fmt.Sprintf("%v not allowed while custom resource definition is terminating", requestInfo.Verb)
@@ -692,6 +699,28 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 	if err != nil {
 		return nil, err
 	}
+
+	// Create replicasPathInCustomResource
+	replicasPathInCustomResource := fieldmanager.ResourcePathMappings{}
+	for _, v := range crd.Spec.Versions {
+		subresources, err := apiextensionshelpers.GetSubresourcesForVersion(crd, v.Name)
+		if err != nil {
+			utilruntime.HandleError(err)
+			return nil, fmt.Errorf("the server could not properly serve the CR subresources")
+		}
+		if subresources == nil || subresources.Scale == nil {
+			replicasPathInCustomResource[schema.GroupVersion{Group: crd.Spec.Group, Version: v.Name}.String()] = nil
+			continue
+		}
+		path := fieldpath.Path{}
+		splitReplicasPath := strings.Split(strings.TrimPrefix(subresources.Scale.SpecReplicasPath, "."), ".")
+		for _, element := range splitReplicasPath {
+			s := element
+			path = append(path, fieldpath.PathElement{FieldName: &s})
+		}
+		replicasPathInCustomResource[schema.GroupVersion{Group: crd.Spec.Group, Version: v.Name}.String()] = path
+	}
+
 	for _, v := range crd.Spec.Versions {
 		// In addition to Unstructured objects (Custom Resources), we also may sometimes need to
 		// decode unversioned Options objects, so we delegate to parameterScheme for such types.
@@ -796,6 +825,7 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			},
 			crd.Status.AcceptedNames.Categories,
 			table,
+			replicasPathInCustomResource,
 		)
 
 		selfLinkPrefix := ""
@@ -858,15 +888,13 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			MaxRequestBodyBytes: r.maxRequestBodyBytes,
 		}
 		if utilfeature.DefaultFeatureGate.Enabled(features.ServerSideApply) {
+			resetFields := storages[v.Name].CustomResource.GetResetFields()
 			reqScope := *requestScopes[v.Name]
-			reqScope.FieldManager, err = fieldmanager.NewDefaultCRDFieldManager(
+			reqScope, err = scopeWithFieldManager(
 				typeConverter,
-				reqScope.Convertor,
-				reqScope.Defaulter,
-				reqScope.Creater,
-				reqScope.Kind,
-				reqScope.HubGroupVersion,
-				false,
+				reqScope,
+				resetFields,
+				"",
 			)
 			if err != nil {
 				return nil, err
@@ -887,27 +915,24 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			SelfLinkPathPrefix: selfLinkPrefix,
 			SelfLinkPathSuffix: "/scale",
 		}
-		// TODO(issues.k8s.io/82046): We can't effectively track ownership on scale requests yet.
-		scaleScope.FieldManager = nil
-		scaleScopes[v.Name] = &scaleScope
 
-		// override status subresource values
-		// shallow copy
-		statusScope := *requestScopes[v.Name]
-		if utilfeature.DefaultFeatureGate.Enabled(features.ServerSideApply) {
-			statusScope.FieldManager, err = fieldmanager.NewDefaultCRDFieldManager(
+		if utilfeature.DefaultFeatureGate.Enabled(features.ServerSideApply) && subresources != nil && subresources.Scale != nil {
+			scaleScope, err = scopeWithFieldManager(
 				typeConverter,
-				statusScope.Convertor,
-				statusScope.Defaulter,
-				statusScope.Creater,
-				statusScope.Kind,
-				statusScope.HubGroupVersion,
-				true,
+				scaleScope,
+				nil,
+				"scale",
 			)
 			if err != nil {
 				return nil, err
 			}
 		}
+
+		scaleScopes[v.Name] = &scaleScope
+
+		// override status subresource values
+		// shallow copy
+		statusScope := *requestScopes[v.Name]
 		statusScope.Subresource = "status"
 		statusScope.Namer = handlers.ContextBasedNaming{
 			SelfLinker:         meta.NewAccessor(),
@@ -915,16 +940,28 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			SelfLinkPathPrefix: selfLinkPrefix,
 			SelfLinkPathSuffix: "/status",
 		}
+
+		if utilfeature.DefaultFeatureGate.Enabled(features.ServerSideApply) && subresources != nil && subresources.Status != nil {
+			resetFields := storages[v.Name].Status.GetResetFields()
+			statusScope, err = scopeWithFieldManager(
+				typeConverter,
+				statusScope,
+				resetFields,
+				"status",
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		statusScopes[v.Name] = &statusScope
 
 		if v.Deprecated {
 			deprecated[v.Name] = true
-			if utilfeature.DefaultFeatureGate.Enabled(features.WarningHeaders) {
-				if v.DeprecationWarning != nil {
-					warnings[v.Name] = append(warnings[v.Name], *v.DeprecationWarning)
-				} else {
-					warnings[v.Name] = append(warnings[v.Name], defaultDeprecationWarning(v.Name, crd.Spec))
-				}
+			if v.DeprecationWarning != nil {
+				warnings[v.Name] = append(warnings[v.Name], *v.DeprecationWarning)
+			} else {
+				warnings[v.Name] = append(warnings[v.Name], defaultDeprecationWarning(v.Name, crd.Spec))
 			}
 		}
 	}
@@ -950,6 +987,24 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 	r.customStorage.Store(storageMap2)
 
 	return ret, nil
+}
+
+func scopeWithFieldManager(typeConverter fieldmanager.TypeConverter, reqScope handlers.RequestScope, resetFields map[fieldpath.APIVersion]*fieldpath.Set, subresource string) (handlers.RequestScope, error) {
+	fieldManager, err := fieldmanager.NewDefaultCRDFieldManager(
+		typeConverter,
+		reqScope.Convertor,
+		reqScope.Defaulter,
+		reqScope.Creater,
+		reqScope.Kind,
+		reqScope.HubGroupVersion,
+		subresource,
+		resetFields,
+	)
+	if err != nil {
+		return handlers.RequestScope{}, err
+	}
+	reqScope.FieldManager = fieldManager
+	return reqScope, nil
 }
 
 func defaultDeprecationWarning(deprecatedVersion string, crd apiextensionsv1.CustomResourceDefinitionSpec) string {
@@ -1319,7 +1374,7 @@ func serverStartingError() error {
 // buildOpenAPIModelsForApply constructs openapi models from any validation schemas specified in the custom resource,
 // and merges it with the models defined in the static OpenAPI spec.
 // Returns nil models if the ServerSideApply feature is disabled, or the static spec is nil, or an error is encountered.
-func buildOpenAPIModelsForApply(staticOpenAPISpec *goopenapispec.Swagger, crd *apiextensionsv1.CustomResourceDefinition) (proto.Models, error) {
+func buildOpenAPIModelsForApply(staticOpenAPISpec *spec.Swagger, crd *apiextensionsv1.CustomResourceDefinition) (proto.Models, error) {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.ServerSideApply) {
 		return nil, nil
 	}
@@ -1327,7 +1382,7 @@ func buildOpenAPIModelsForApply(staticOpenAPISpec *goopenapispec.Swagger, crd *a
 		return nil, nil
 	}
 
-	specs := []*goopenapispec.Swagger{}
+	specs := []*spec.Swagger{}
 	for _, v := range crd.Spec.Versions {
 		// Defaults are not pruned here, but before being served.
 		s, err := builder.BuildSwagger(crd, v.Name, builder.Options{V2: false, StripValueValidation: true, StripNullable: true, AllowNonStructural: false})

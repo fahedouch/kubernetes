@@ -23,12 +23,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	"go.etcd.io/etcd/clientv3"
 	"google.golang.org/grpc/grpclog"
 	"k8s.io/klog/v2"
 
@@ -47,12 +45,6 @@ You can use 'hack/install-etcd.sh' to install a copy in third_party/.
 
 // getEtcdPath returns a path to an etcd executable.
 func getEtcdPath() (string, error) {
-	bazelPath := filepath.Join(os.Getenv("RUNFILES_DIR"), fmt.Sprintf("com_coreos_etcd_%s", runtime.GOARCH), "etcd")
-
-	p, err := exec.LookPath(bazelPath)
-	if err == nil {
-		return p, nil
-	}
 	return exec.LookPath("etcd")
 }
 
@@ -127,8 +119,8 @@ func RunCustomEtcd(dataDir string, customFlags []string) (url string, stopFn fun
 		customURL,
 		"--listen-peer-urls",
 		"http://127.0.0.1:0",
-		"--log-package-levels",
-		"*=NOTICE", // set to INFO or DEBUG for more logs
+		"-log-level",
+		"warn", // set to info or debug for more logs
 	}
 	args = append(args, customFlags...)
 	cmd := exec.CommandContext(ctx, etcdPath, args...)
@@ -146,7 +138,7 @@ func RunCustomEtcd(dataDir string, customFlags []string) (url string, stopFn fun
 
 	// Quiet etcd logs for integration tests
 	// Comment out to get verbose logs if desired
-	clientv3.SetLogger(grpclog.NewLoggerV2(ioutil.Discard, ioutil.Discard, os.Stderr))
+	grpclog.SetLoggerV2(grpclog.NewLoggerV2(ioutil.Discard, ioutil.Discard, os.Stderr))
 
 	if err := cmd.Start(); err != nil {
 		return "", nil, fmt.Errorf("failed to run etcd: %v", err)

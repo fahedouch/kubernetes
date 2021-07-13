@@ -22,16 +22,17 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	plugintesting "k8s.io/kubernetes/pkg/scheduler/framework/plugins/testing"
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/internal/cache"
-	"k8s.io/kubernetes/pkg/scheduler/internal/parallelize"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	"k8s.io/utils/pointer"
 )
@@ -115,8 +116,8 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 			},
 		},
 		{
-			name: "system defaults constraints and a replica set",
-			pod:  st.MakePod().Name("p").Label("foo", "tar").Label("baz", "sup").Obj(),
+			name: "system default constraints and a replicaset",
+			pod:  st.MakePod().Name("p").Namespace("default").Label("foo", "tar").Label("baz", "sup").OwnerReference("rs1", appsv1.SchemeGroupVersion.WithKind("ReplicaSet")).Obj(),
 			config: config.PodTopologySpreadArgs{
 				DefaultingType: config.SystemDefaulting,
 			},
@@ -124,7 +125,7 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 				st.MakeNode().Name("node-a").Label(v1.LabelHostname, "node-a").Label(v1.LabelTopologyZone, "mars").Obj(),
 			},
 			objs: []runtime.Object{
-				&appsv1.ReplicaSet{Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("foo").Obj()}},
+				&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rs1"}, Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("foo").Obj()}},
 			},
 			want: &preScoreState{
 				Constraints: []topologySpreadConstraint{
@@ -147,8 +148,8 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 			},
 		},
 		{
-			name: "defaults constraints and a replica set",
-			pod:  st.MakePod().Name("p").Label("foo", "tar").Label("baz", "sup").Obj(),
+			name: "default constraints and a replicaset",
+			pod:  st.MakePod().Name("p").Namespace("default").Label("foo", "tar").Label("baz", "sup").OwnerReference("rs1", appsv1.SchemeGroupVersion.WithKind("ReplicaSet")).Obj(),
 			config: config.PodTopologySpreadArgs{
 				DefaultConstraints: []v1.TopologySpreadConstraint{
 					{MaxSkew: 1, TopologyKey: v1.LabelHostname, WhenUnsatisfiable: v1.ScheduleAnyway},
@@ -161,7 +162,7 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 				st.MakeNode().Name("node-a").Label("rack", "rack1").Label(v1.LabelHostname, "node-a").Label("planet", "mars").Obj(),
 			},
 			objs: []runtime.Object{
-				&appsv1.ReplicaSet{Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("foo").Obj()}},
+				&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rs1"}, Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("foo").Obj()}},
 			},
 			want: &preScoreState{
 				Constraints: []topologySpreadConstraint{
@@ -184,8 +185,8 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 			},
 		},
 		{
-			name: "defaults constraints and a replica set that doesn't match",
-			pod:  st.MakePod().Name("p").Label("foo", "bar").Label("baz", "sup").Obj(),
+			name: "default constraints and a replicaset that doesn't match",
+			pod:  st.MakePod().Name("p").Namespace("default").Label("foo", "bar").Label("baz", "sup").OwnerReference("rs2", appsv1.SchemeGroupVersion.WithKind("ReplicaSet")).Obj(),
 			config: config.PodTopologySpreadArgs{
 				DefaultConstraints: []v1.TopologySpreadConstraint{
 					{MaxSkew: 2, TopologyKey: "planet", WhenUnsatisfiable: v1.ScheduleAnyway},
@@ -196,15 +197,16 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 				st.MakeNode().Name("node-a").Label("planet", "mars").Obj(),
 			},
 			objs: []runtime.Object{
-				&appsv1.ReplicaSet{Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("tar").Obj()}},
+				&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rs1"}, Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("tar").Obj()}},
 			},
 			want: &preScoreState{
 				TopologyPairToPodCounts: make(map[topologyPair]*int64),
 			},
 		},
 		{
-			name: "defaults constraints and a replica set, but pod has constraints",
-			pod: st.MakePod().Name("p").Label("foo", "bar").Label("baz", "sup").
+			name: "default constraints and a replicaset, but pod has constraints",
+			pod: st.MakePod().Name("p").Namespace("default").Label("foo", "bar").Label("baz", "sup").
+				OwnerReference("rs1", appsv1.SchemeGroupVersion.WithKind("ReplicaSet")).
 				SpreadConstraint(1, "zone", v1.DoNotSchedule, st.MakeLabelSelector().Label("foo", "bar").Obj()).
 				SpreadConstraint(2, "planet", v1.ScheduleAnyway, st.MakeLabelSelector().Label("baz", "sup").Obj()).Obj(),
 			config: config.PodTopologySpreadArgs{
@@ -217,7 +219,7 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 				st.MakeNode().Name("node-a").Label("planet", "mars").Label("galaxy", "andromeda").Obj(),
 			},
 			objs: []runtime.Object{
-				&appsv1.ReplicaSet{Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("foo").Obj()}},
+				&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rs1"}, Spec: appsv1.ReplicaSetSpec{Selector: st.MakeLabelSelector().Exists("foo").Obj()}},
 			},
 			want: &preScoreState{
 				Constraints: []topologySpreadConstraint{
@@ -239,7 +241,7 @@ func TestPreScoreStateEmptyNodes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			informerFactory := informers.NewSharedInformerFactory(fake.NewSimpleClientset(tt.objs...), 0)
-			f, err := frameworkruntime.NewFramework(nil, nil, nil,
+			f, err := frameworkruntime.NewFramework(nil, nil,
 				frameworkruntime.WithSnapshotSharedLister(cache.NewSnapshot(nil, tt.nodes)),
 				frameworkruntime.WithInformerFactory(informerFactory))
 			if err != nil {
@@ -687,8 +689,8 @@ func TestPodTopologySpreadScore(t *testing.T) {
 			allNodes := append([]*v1.Node{}, tt.nodes...)
 			allNodes = append(allNodes, tt.failedNodes...)
 			state := framework.NewCycleState()
-			snapshot := cache.NewSnapshot(tt.existingPods, allNodes)
-			p := &PodTopologySpread{sharedLister: snapshot}
+			pl := plugintesting.SetupPlugin(t, New, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, cache.NewSnapshot(tt.existingPods, allNodes))
+			p := pl.(*PodTopologySpread)
 
 			status := p.PreScore(context.Background(), state, tt.pod, tt.nodes)
 			if !status.IsSuccess() {
@@ -757,8 +759,8 @@ func BenchmarkTestPodTopologySpreadScore(b *testing.B) {
 		b.Run(tt.name, func(b *testing.B) {
 			existingPods, allNodes, filteredNodes := st.MakeNodesAndPodsForEvenPodsSpread(tt.pod.Labels, tt.existingPodsNum, tt.allNodesNum, tt.filteredNodesNum)
 			state := framework.NewCycleState()
-			snapshot := cache.NewSnapshot(existingPods, allNodes)
-			p := &PodTopologySpread{sharedLister: snapshot}
+			pl := plugintesting.SetupPlugin(b, New, &config.PodTopologySpreadArgs{DefaultingType: config.ListDefaulting}, cache.NewSnapshot(existingPods, allNodes))
+			p := pl.(*PodTopologySpread)
 
 			status := p.PreScore(context.Background(), state, tt.pod, filteredNodes)
 			if !status.IsSuccess() {
@@ -827,7 +829,7 @@ func BenchmarkTestDefaultEvenPodsSpreadPriority(b *testing.B) {
 			)
 			ctx := context.Background()
 			informerFactory := informers.NewSharedInformerFactory(client, 0)
-			f, err := frameworkruntime.NewFramework(nil, nil, nil,
+			f, err := frameworkruntime.NewFramework(nil, nil,
 				frameworkruntime.WithSnapshotSharedLister(snapshot),
 				frameworkruntime.WithInformerFactory(informerFactory))
 			if err != nil {
@@ -854,7 +856,7 @@ func BenchmarkTestDefaultEvenPodsSpreadPriority(b *testing.B) {
 					score, _ := p.Score(ctx, state, pod, n.Name)
 					gotList[i] = framework.NodeScore{Name: n.Name, Score: score}
 				}
-				parallelize.Until(ctx, len(filteredNodes), scoreNode)
+				p.parallelizer.Until(ctx, len(filteredNodes), scoreNode)
 				status = p.NormalizeScore(ctx, state, pod, gotList)
 				if !status.IsSuccess() {
 					b.Fatal(status)

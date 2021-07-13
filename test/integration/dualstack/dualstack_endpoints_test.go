@@ -24,7 +24,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	discovery "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -51,7 +51,7 @@ func TestDualStackEndpoints(t *testing.T) {
 	dualStack := true
 	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, dualStack)()
 
-	cfg := framework.NewIntegrationTestMasterConfig()
+	cfg := framework.NewIntegrationTestControlPlaneConfig()
 	_, cidr, err := net.ParseCIDR(serviceCIDR)
 	if err != nil {
 		t.Fatalf("Bad cidr: %v", err)
@@ -64,7 +64,7 @@ func TestDualStackEndpoints(t *testing.T) {
 	}
 	cfg.ExtraConfig.SecondaryServiceIPRange = *secCidr
 
-	_, s, closeFn := framework.RunAMaster(cfg)
+	_, s, closeFn := framework.RunAnAPIServer(cfg)
 	defer closeFn()
 
 	client := clientset.NewForConfigOrDie(&restclient.Config{Host: s.URL})
@@ -115,7 +115,7 @@ func TestDualStackEndpoints(t *testing.T) {
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Nodes(),
-		informers.Discovery().V1beta1().EndpointSlices(),
+		informers.Discovery().V1().EndpointSlices(),
 		int32(100),
 		client,
 		1*time.Second)
@@ -253,7 +253,7 @@ func TestDualStackEndpoints(t *testing.T) {
 			// wait until the endpoint slices are created
 			err = wait.PollImmediate(1*time.Second, wait.ForeverTestTimeout, func() (bool, error) {
 				lSelector := discovery.LabelServiceName + "=" + svc.Name
-				esList, err := client.DiscoveryV1beta1().EndpointSlices(ns.Name).List(context.TODO(), metav1.ListOptions{LabelSelector: lSelector})
+				esList, err := client.DiscoveryV1().EndpointSlices(ns.Name).List(context.TODO(), metav1.ListOptions{LabelSelector: lSelector})
 				if err != nil {
 					t.Logf("Error listing EndpointSlices: %v", err)
 					return false, nil

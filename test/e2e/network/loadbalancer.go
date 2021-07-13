@@ -42,13 +42,14 @@ import (
 	e2erc "k8s.io/kubernetes/test/e2e/framework/rc"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	"k8s.io/kubernetes/test/e2e/network/common"
 	gcecloud "k8s.io/legacy-cloud-providers/gce"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("LoadBalancers", func() {
+var _ = common.SIGDescribe("LoadBalancers", func() {
 	f := framework.NewDefaultFramework("loadbalancers")
 
 	var cs clientset.Interface
@@ -688,7 +689,7 @@ var _ = SIGDescribe("LoadBalancers", func() {
 	// This test creates a load balancer, make sure its health check interval
 	// equals to gceHcCheckIntervalSeconds. Then the interval is manipulated
 	// to be something else, see if the interval will be reconciled.
-	ginkgo.It("should reconcile LB health check interval [Slow][Serial]", func() {
+	ginkgo.It("should reconcile LB health check interval [Slow][Serial][Disruptive]", func() {
 		const gceHcCheckIntervalSeconds = int64(8)
 		// This test is for clusters on GCE.
 		// (It restarts kube-controller-manager, which we don't support on GKE)
@@ -847,7 +848,7 @@ var _ = SIGDescribe("LoadBalancers", func() {
 	})
 })
 
-var _ = SIGDescribe("ESIPP [Slow]", func() {
+var _ = common.SIGDescribe("LoadBalancers ESIPP [Slow]", func() {
 	f := framework.NewDefaultFramework("esipp")
 	var loadBalancerCreateTimeout time.Duration
 
@@ -1195,8 +1196,8 @@ var _ = SIGDescribe("ESIPP [Slow]", func() {
 		// Poll till kube-proxy re-adds the MASQUERADE rule on the node.
 		ginkgo.By(fmt.Sprintf("checking source ip is NOT preserved through loadbalancer %v", ingressIP))
 		var clientIP string
-		pollErr := wait.PollImmediate(framework.Poll, e2eservice.KubeProxyLagTimeout, func() (bool, error) {
-			clientIP, err := GetHTTPContent(ingressIP, svcTCPPort, e2eservice.KubeProxyLagTimeout, "/clientip")
+		pollErr := wait.PollImmediate(framework.Poll, 3*e2eservice.KubeProxyLagTimeout, func() (bool, error) {
+			clientIP, err := GetHTTPContent(ingressIP, svcTCPPort, e2eservice.KubeProxyLagTimeout, path)
 			if err != nil {
 				return false, nil
 			}
@@ -1222,7 +1223,8 @@ var _ = SIGDescribe("ESIPP [Slow]", func() {
 			svc.Spec.HealthCheckNodePort = int32(healthCheckNodePort)
 		})
 		framework.ExpectNoError(err)
-		pollErr = wait.PollImmediate(framework.Poll, e2eservice.KubeProxyLagTimeout, func() (bool, error) {
+		loadBalancerPropagationTimeout := e2eservice.GetServiceLoadBalancerPropagationTimeout(cs)
+		pollErr = wait.PollImmediate(framework.PollShortTimeout, loadBalancerPropagationTimeout, func() (bool, error) {
 			clientIP, err := GetHTTPContent(ingressIP, svcTCPPort, e2eservice.KubeProxyLagTimeout, path)
 			if err != nil {
 				return false, nil

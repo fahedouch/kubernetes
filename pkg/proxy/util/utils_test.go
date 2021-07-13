@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
 	"reflect"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	fake "k8s.io/kubernetes/pkg/proxy/util/testing"
+	utilnet "k8s.io/utils/net"
 )
 
 func TestValidateWorks(t *testing.T) {
@@ -401,7 +403,7 @@ type InterfaceAddrsPair struct {
 	addrs []net.Addr
 }
 
-func TestGetNodeAddressses(t *testing.T) {
+func TestGetNodeAddresses(t *testing.T) {
 	testCases := []struct {
 		cidrs         []string
 		nw            *fake.FakeNetwork
@@ -415,11 +417,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "10.20.30.51/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("10.20.30.51"), Mask: net.CIDRMask(24, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 2, MTU: 0, Name: "eth1", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "100.200.201.1/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("100.200.201.1"), Mask: net.CIDRMask(24, 32)}},
 				},
 			},
 			expected: sets.NewString("10.20.30.51"),
@@ -430,11 +432,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "10.20.30.51/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("10.20.30.51"), Mask: net.CIDRMask(24, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "127.0.0.1/8"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)}},
 				},
 			},
 			expected: sets.NewString("0.0.0.0/0"),
@@ -445,11 +447,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "2001:db8::1/32"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("2001:db8::1"), Mask: net.CIDRMask(32, 128)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "::1/128"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)}},
 				},
 			},
 			expected: sets.NewString("2001:db8::1", "::1"),
@@ -460,11 +462,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "2001:db8::1/32"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("2001:db8::1"), Mask: net.CIDRMask(32, 128)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "::1/128"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)}},
 				},
 			},
 			expected: sets.NewString("::/0"),
@@ -475,11 +477,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "10.20.30.51/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("10.20.30.51"), Mask: net.CIDRMask(24, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "127.0.0.1/8"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)}},
 				},
 			},
 			expected: sets.NewString("127.0.0.1"),
@@ -490,7 +492,7 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "127.0.1.1/8"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.1.1"), Mask: net.CIDRMask(8, 32)}},
 				},
 			},
 			expected: sets.NewString("127.0.1.1"),
@@ -501,11 +503,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "10.20.30.51/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("10.20.30.51"), Mask: net.CIDRMask(24, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 2, MTU: 0, Name: "eth1", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "100.200.201.1/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("100.200.201.1"), Mask: net.CIDRMask(24, 32)}},
 				},
 			},
 			expected: sets.NewString("10.20.30.51", "100.200.201.1"),
@@ -516,11 +518,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "192.168.1.2/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.2"), Mask: net.CIDRMask(24, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "127.0.0.1/8"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)}},
 				},
 			},
 			expected:    nil,
@@ -532,11 +534,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "192.168.1.2/24"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.2"), Mask: net.CIDRMask(24, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "127.0.0.1/8"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)}},
 				},
 			},
 			expected: sets.NewString("0.0.0.0/0", "::/0"),
@@ -547,11 +549,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "2001:db8::1/32"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("2001:db8::1"), Mask: net.CIDRMask(32, 128)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "::1/128"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)}},
 				},
 			},
 			expected: sets.NewString("0.0.0.0/0", "::/0"),
@@ -562,7 +564,7 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "1.2.3.4/30"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("1.2.3.4"), Mask: net.CIDRMask(30, 32)}},
 				},
 			},
 			expected: sets.NewString("0.0.0.0/0"),
@@ -573,11 +575,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "1.2.3.4/30"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("1.2.3.4"), Mask: net.CIDRMask(30, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "::1/128"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)}},
 				},
 			},
 			expected: sets.NewString("0.0.0.0/0", "::1"),
@@ -588,11 +590,11 @@ func TestGetNodeAddressses(t *testing.T) {
 			itfAddrsPairs: []InterfaceAddrsPair{
 				{
 					itf:   net.Interface{Index: 0, MTU: 0, Name: "eth0", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "1.2.3.4/30"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("1.2.3.4"), Mask: net.CIDRMask(30, 32)}},
 				},
 				{
 					itf:   net.Interface{Index: 1, MTU: 0, Name: "lo", HardwareAddr: nil, Flags: 0},
-					addrs: []net.Addr{fake.AddrStruct{Val: "::1/128"}},
+					addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)}},
 				},
 			},
 			expected: sets.NewString("::/0", "1.2.3.4"),
@@ -1048,7 +1050,103 @@ func TestGetClusterIPByFamily(t *testing.T) {
 			}
 		})
 	}
+}
 
+type fakeClosable struct {
+	closed bool
+}
+
+func (c *fakeClosable) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestRevertPorts(t *testing.T) {
+	testCases := []struct {
+		replacementPorts []utilnet.LocalPort
+		existingPorts    []utilnet.LocalPort
+		expectToBeClose  []bool
+	}{
+		{
+			replacementPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5002},
+				{Port: 5003},
+			},
+			existingPorts:   []utilnet.LocalPort{},
+			expectToBeClose: []bool{true, true, true},
+		},
+		{
+			replacementPorts: []utilnet.LocalPort{},
+			existingPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5002},
+				{Port: 5003},
+			},
+			expectToBeClose: []bool{},
+		},
+		{
+			replacementPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5002},
+				{Port: 5003},
+			},
+			existingPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5002},
+				{Port: 5003},
+			},
+			expectToBeClose: []bool{false, false, false},
+		},
+		{
+			replacementPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5002},
+				{Port: 5003},
+			},
+			existingPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5003},
+			},
+			expectToBeClose: []bool{false, true, false},
+		},
+		{
+			replacementPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5002},
+				{Port: 5003},
+			},
+			existingPorts: []utilnet.LocalPort{
+				{Port: 5001},
+				{Port: 5002},
+				{Port: 5003},
+				{Port: 5004},
+			},
+			expectToBeClose: []bool{false, false, false},
+		},
+	}
+
+	for i, tc := range testCases {
+		replacementPortsMap := make(map[utilnet.LocalPort]utilnet.Closeable)
+		for _, lp := range tc.replacementPorts {
+			replacementPortsMap[lp] = &fakeClosable{}
+		}
+		existingPortsMap := make(map[utilnet.LocalPort]utilnet.Closeable)
+		for _, lp := range tc.existingPorts {
+			existingPortsMap[lp] = &fakeClosable{}
+		}
+		RevertPorts(replacementPortsMap, existingPortsMap)
+		for j, expectation := range tc.expectToBeClose {
+			if replacementPortsMap[tc.replacementPorts[j]].(*fakeClosable).closed != expectation {
+				t.Errorf("Expect replacement localport %v to be %v in test case %v", tc.replacementPorts[j], expectation, i)
+			}
+		}
+		for _, lp := range tc.existingPorts {
+			if existingPortsMap[lp].(*fakeClosable).closed == true {
+				t.Errorf("Expect existing localport %v to be false in test case %v", lp, i)
+			}
+		}
+	}
 }
 
 func TestWriteLine(t *testing.T) {
@@ -1085,6 +1183,44 @@ func TestWriteLine(t *testing.T) {
 	}
 }
 
+func TestWriteRuleLine(t *testing.T) {
+	testCases := []struct {
+		name      string
+		chainName string
+		words     []string
+		expected  string
+	}{
+		{
+			name:      "write no line due to no words",
+			chainName: "KUBE-SVC-FOO",
+			words:     []string{},
+			expected:  "",
+		},
+		{
+			name:      "write one line",
+			chainName: "KUBE-XLB-FOO",
+			words:     []string{"test1"},
+			expected:  "-A KUBE-XLB-FOO test1\n",
+		},
+		{
+			name:      "write multi word line",
+			chainName: "lolChain",
+			words:     []string{"test1", "test2", "test3"},
+			expected:  "-A lolChain test1 test2 test3\n",
+		},
+	}
+	testBuffer := bytes.NewBuffer(nil)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			testBuffer.Reset()
+			WriteRuleLine(testBuffer, testCase.chainName, testCase.words...)
+			if !strings.EqualFold(testBuffer.String(), testCase.expected) {
+				t.Fatalf("write word is %v\n expected: %s, got: %s", testCase.words, testCase.expected, testBuffer.String())
+			}
+		})
+	}
+}
+
 func TestWriteBytesLine(t *testing.T) {
 	testCases := []struct {
 		name     string
@@ -1113,4 +1249,61 @@ func TestWriteBytesLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteCountLines(t *testing.T) {
+
+	testCases := []struct {
+		name     string
+		expected int
+	}{
+		{
+			name:     "write no line",
+			expected: 0,
+		},
+		{
+			name:     "write one line",
+			expected: 1,
+		},
+		{
+			name:     "write 100 lines",
+			expected: 100,
+		},
+		{
+			name:     "write 1000 lines",
+			expected: 1000,
+		},
+		{
+			name:     "write 10000 lines",
+			expected: 10000,
+		},
+		{
+			name:     "write 100000 lines",
+			expected: 100000,
+		},
+	}
+	testBuffer := bytes.NewBuffer(nil)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			testBuffer.Reset()
+			for i := 0; i < testCase.expected; i++ {
+				WriteLine(testBuffer, randSeq())
+			}
+			n := CountBytesLines(testBuffer.Bytes())
+			if n != testCase.expected {
+				t.Fatalf("lines expected: %d, got: %d", testCase.expected, n)
+			}
+		})
+	}
+}
+
+// obtained from https://stackoverflow.com/a/22892986
+var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func randSeq() string {
+	b := make([]rune, 30)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
 }

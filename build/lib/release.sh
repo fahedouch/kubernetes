@@ -28,7 +28,7 @@ readonly RELEASE_STAGE="${LOCAL_OUTPUT_ROOT}/release-stage"
 readonly RELEASE_TARS="${LOCAL_OUTPUT_ROOT}/release-tars"
 readonly RELEASE_IMAGES="${LOCAL_OUTPUT_ROOT}/release-images"
 
-KUBE_BUILD_CONFORMANCE=${KUBE_BUILD_CONFORMANCE:-y}
+KUBE_BUILD_CONFORMANCE=${KUBE_BUILD_CONFORMANCE:-n}
 KUBE_BUILD_PULL_LATEST_IMAGES=${KUBE_BUILD_PULL_LATEST_IMAGES:-y}
 
 # Validate a ci version
@@ -364,8 +364,13 @@ function kube::release::create_docker_images_for_server() {
       local base_image=${wrappable##*,}
       local binary_file_path="${binary_dir}/${binary_name}"
       local docker_build_path="${binary_file_path}.dockerbuild"
-      local docker_file_path="${KUBE_ROOT}/build/server-image/Dockerfile"
       local docker_image_tag="${docker_registry}/${binary_name}-${arch}:${docker_tag}"
+
+      local docker_file_path="${KUBE_ROOT}/build/server-image/Dockerfile"
+      # If this binary has its own Dockerfile use that else use the generic Dockerfile.
+      if [[ -f "${KUBE_ROOT}/build/server-image/${binary_name}/Dockerfile" ]]; then
+          docker_file_path="${KUBE_ROOT}/build/server-image/${binary_name}/Dockerfile"
+      fi
 
       kube::log::status "Starting docker build for image: ${binary_name}-${arch}"
       (
@@ -380,6 +385,7 @@ function kube::release::create_docker_images_for_server() {
           --load ${docker_build_opts:+"${docker_build_opts}"} \
           -t "${docker_image_tag}" \
           --build-arg BASEIMAGE="${base_image}" \
+          --build-arg SETCAP_IMAGE="${KUBE_BUILD_SETCAP_IMAGE}" \
           --build-arg BINARY="${binary_name}" \
           "${docker_build_path}" >"${build_log}" 2>&1; then
             cat "${build_log}"

@@ -17,10 +17,11 @@ limitations under the License.
 package metrics
 
 import (
-	"fmt"
 	"net/http"
 	"net/url"
 	"testing"
+
+	"k8s.io/apiserver/pkg/endpoints/request"
 )
 
 func TestCleanVerb(t *testing.T) {
@@ -111,42 +112,48 @@ func TestCleanVerb(t *testing.T) {
 	}
 }
 
-func TestContentType(t *testing.T) {
+func TestCleanScope(t *testing.T) {
 	testCases := []struct {
-		rawContentType      string
-		expectedContentType string
+		name          string
+		requestInfo   *request.RequestInfo
+		expectedScope string
 	}{
 		{
-			rawContentType:      "application/json",
-			expectedContentType: "application/json",
+			name:          "empty scope",
+			requestInfo:   &request.RequestInfo{},
+			expectedScope: "",
 		},
 		{
-			rawContentType:      "image/svg+xml",
-			expectedContentType: "other",
+			name: "resource scope",
+			requestInfo: &request.RequestInfo{
+				Name:              "my-resource",
+				Namespace:         "my-namespace",
+				IsResourceRequest: false,
+			},
+			expectedScope: "resource",
 		},
 		{
-			rawContentType:      "text/plain; charset=utf-8",
-			expectedContentType: "text/plain;charset=utf-8",
+			name: "namespace scope",
+			requestInfo: &request.RequestInfo{
+				Namespace:         "my-namespace",
+				IsResourceRequest: false,
+			},
+			expectedScope: "namespace",
 		},
 		{
-			rawContentType:      "application/json;foo=bar",
-			expectedContentType: "other",
-		},
-		{
-			rawContentType:      "application/json;charset=hancoding",
-			expectedContentType: "other",
-		},
-		{
-			rawContentType:      "unknownbutvalidtype",
-			expectedContentType: "other",
+			name: "cluster scope",
+			requestInfo: &request.RequestInfo{
+				Namespace:         "",
+				IsResourceRequest: true,
+			},
+			expectedScope: "cluster",
 		},
 	}
 
-	for _, tt := range testCases {
-		t.Run(fmt.Sprintf("parse %s", tt.rawContentType), func(t *testing.T) {
-			cleansedContentType := cleanContentType(tt.rawContentType)
-			if cleansedContentType != tt.expectedContentType {
-				t.Errorf("Got %s, but expected %s", cleansedContentType, tt.expectedContentType)
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			if CleanScope(test.requestInfo) != test.expectedScope {
+				t.Errorf("failed to clean scope: %v", test.requestInfo)
 			}
 		})
 	}

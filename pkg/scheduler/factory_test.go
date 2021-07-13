@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +36,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
-	apicore "k8s.io/kubernetes/pkg/apis/core"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	frameworkplugins "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
@@ -64,13 +64,12 @@ func TestCreate(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	factory := newConfigFactory(client, stopCh)
-	if _, err := factory.createFromProvider(schedulerapi.SchedulerDefaultProviderName); err != nil {
+	if _, err := factory.create(); err != nil {
 		t.Error(err)
 	}
 }
 
-// createAlgorithmSourceFromPolicy creates the schedulerAlgorithmSource from policy string
-func createAlgorithmSourceFromPolicy(configData []byte, clientSet clientset.Interface) schedulerapi.SchedulerAlgorithmSource {
+func createPolicySource(configData []byte, clientSet clientset.Interface) *schedulerapi.SchedulerPolicySource {
 	configPolicyName := "scheduler-custom-policy-config"
 	policyConfigMap := v1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
@@ -82,12 +81,10 @@ func createAlgorithmSourceFromPolicy(configData []byte, clientSet clientset.Inte
 
 	clientSet.CoreV1().ConfigMaps(metav1.NamespaceSystem).Create(context.TODO(), &policyConfigMap, metav1.CreateOptions{})
 
-	return schedulerapi.SchedulerAlgorithmSource{
-		Policy: &schedulerapi.SchedulerPolicySource{
-			ConfigMap: &schedulerapi.SchedulerPolicyConfigMapSource{
-				Namespace: policyConfigMap.Namespace,
-				Name:      policyConfigMap.Name,
-			},
+	return &schedulerapi.SchedulerPolicySource{
+		ConfigMap: &schedulerapi.SchedulerPolicyConfigMapSource{
+			Namespace: policyConfigMap.Namespace,
+			Name:      policyConfigMap.Name,
 		},
 	}
 }
@@ -100,6 +97,7 @@ func TestCreateFromConfig(t *testing.T) {
 		configData       []byte
 		wantPluginConfig []schedulerapi.PluginConfig
 		wantPlugins      *schedulerapi.Plugins
+		wantErr          string
 	}{
 
 		{
@@ -127,8 +125,22 @@ func TestCreateFromConfig(t *testing.T) {
 					Args: &schedulerapi.NodeAffinityArgs{},
 				},
 				{
+					Name: noderesources.BalancedAllocationName,
+					Args: &schedulerapi.NodeResourcesBalancedAllocationArgs{
+						Resources: []schedulerapi.ResourceSpec{{Name: "cpu", Weight: 1}, {Name: "memory", Weight: 1}},
+					},
+				},
+				{
 					Name: noderesources.FitName,
-					Args: &schedulerapi.NodeResourcesFitArgs{},
+					Args: &schedulerapi.NodeResourcesFitArgs{
+						ScoringStrategy: &schedulerapi.ScoringStrategy{
+							Type: schedulerapi.LeastAllocated,
+							Resources: []schedulerapi.ResourceSpec{
+								{Name: "cpu", Weight: 1},
+								{Name: "memory", Weight: 1},
+							},
+						},
+					},
 				},
 				{
 					Name: noderesources.LeastAllocatedName,
@@ -156,6 +168,7 @@ func TestCreateFromConfig(t *testing.T) {
 					Enabled: []schedulerapi.Plugin{
 						{Name: "NodeResourcesFit"},
 						{Name: "NodePorts"},
+						{Name: "NodeAffinity"},
 						{Name: "VolumeBinding"},
 						{Name: "PodTopologySpread"},
 						{Name: "InterPodAffinity"},
@@ -343,7 +356,15 @@ func TestCreateFromConfig(t *testing.T) {
 				},
 				{
 					Name: "NodeResourcesFit",
-					Args: &schedulerapi.NodeResourcesFitArgs{},
+					Args: &schedulerapi.NodeResourcesFitArgs{
+						ScoringStrategy: &schedulerapi.ScoringStrategy{
+							Type: schedulerapi.LeastAllocated,
+							Resources: []schedulerapi.ResourceSpec{
+								{Name: "cpu", Weight: 1},
+								{Name: "memory", Weight: 1},
+							},
+						},
+					},
 				},
 			},
 			wantPlugins: &schedulerapi.Plugins{
@@ -374,6 +395,22 @@ func TestCreateFromConfig(t *testing.T) {
 				Bind: schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultBinder"}}},
 			},
 		},
+		{
+			name: "policy with invalid arguments",
+			configData: []byte(`{
+				"kind" : "Policy",
+				"apiVersion" : "v1",
+				"predicates" : [
+					{"name" : "TestZoneAffinity", "argument" : {"serviceAffinity" : {"labels" : ["zone"]}}}
+				],
+				"priorities" : [
+					{"name": "RequestedToCapacityRatioPriority", "weight": 2},
+					{"name" : "NodeAffinityPriority", "weight" : 10},
+					{"name" : "InterPodAffinityPriority", "weight" : 100}
+				]
+			}`),
+			wantErr: `couldn't create scheduler from policy: priority type not found for "RequestedToCapacityRatioPriority"`,
+		},
 	}
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -387,7 +424,8 @@ func TestCreateFromConfig(t *testing.T) {
 				informerFactory,
 				recorderFactory,
 				make(chan struct{}),
-				WithAlgorithmSource(createAlgorithmSourceFromPolicy(tc.configData, client)),
+				WithProfiles([]schedulerapi.KubeSchedulerProfile(nil)...),
+				WithLegacyPolicySource(createPolicySource(tc.configData, client)),
 				WithBuildFrameworkCapturer(func(p schedulerapi.KubeSchedulerProfile) {
 					if p.SchedulerName != v1.DefaultSchedulerName {
 						t.Errorf("unexpected scheduler name: want %q, got %q", v1.DefaultSchedulerName, p.SchedulerName)
@@ -402,9 +440,10 @@ func TestCreateFromConfig(t *testing.T) {
 					}
 				}),
 			)
-
 			if err != nil {
-				t.Fatalf("Error constructing: %v", err)
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Unexpected error, got %v, expect: %s", err, tc.wantErr)
+				}
 			}
 		})
 	}
@@ -452,7 +491,7 @@ func TestDefaultErrorFunc(t *testing.T) {
 			// Need to add/update/delete testPod to the store.
 			podInformer.Informer().GetStore().Add(testPod)
 
-			queue := internalqueue.NewPriorityQueue(nil, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
+			queue := internalqueue.NewPriorityQueue(nil, informerFactory, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
 			schedulerCache := internalcache.New(30*time.Second, stopCh)
 
 			queue.Add(testPod)
@@ -467,7 +506,7 @@ func TestDefaultErrorFunc(t *testing.T) {
 				queue.Delete(testPod)
 			}
 
-			testPodInfo := &framework.QueuedPodInfo{Pod: testPod}
+			testPodInfo := &framework.QueuedPodInfo{PodInfo: framework.NewPodInfo(testPod)}
 			errFunc := MakeDefaultErrorFunc(client, podInformer.Lister(), queue, schedulerCache)
 			errFunc(testPodInfo, tt.injectErr)
 
@@ -504,13 +543,13 @@ func TestDefaultErrorFunc_NodeNotFound(t *testing.T) {
 			name:             "node is deleted during a scheduling cycle",
 			nodes:            []v1.Node{*nodeFoo, *nodeBar},
 			nodeNameToDelete: "foo",
-			injectErr:        apierrors.NewNotFound(apicore.Resource("node"), nodeFoo.Name),
+			injectErr:        apierrors.NewNotFound(v1.Resource("node"), nodeFoo.Name),
 			expectNodeNames:  sets.NewString("bar"),
 		},
 		{
 			name:            "node is not deleted but NodeNotFound is received incorrectly",
 			nodes:           []v1.Node{*nodeFoo, *nodeBar},
-			injectErr:       apierrors.NewNotFound(apicore.Resource("node"), nodeFoo.Name),
+			injectErr:       apierrors.NewNotFound(v1.Resource("node"), nodeFoo.Name),
 			expectNodeNames: sets.NewString("foo", "bar"),
 		},
 	}
@@ -526,7 +565,7 @@ func TestDefaultErrorFunc_NodeNotFound(t *testing.T) {
 			// Need to add testPod to the store.
 			podInformer.Informer().GetStore().Add(testPod)
 
-			queue := internalqueue.NewPriorityQueue(nil, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
+			queue := internalqueue.NewPriorityQueue(nil, informerFactory, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
 			schedulerCache := internalcache.New(30*time.Second, stopCh)
 
 			for i := range tt.nodes {
@@ -538,7 +577,7 @@ func TestDefaultErrorFunc_NodeNotFound(t *testing.T) {
 				}
 			}
 
-			testPodInfo := &framework.QueuedPodInfo{Pod: testPod}
+			testPodInfo := &framework.QueuedPodInfo{PodInfo: framework.NewPodInfo(testPod)}
 			errFunc := MakeDefaultErrorFunc(client, podInformer.Lister(), queue, schedulerCache)
 			errFunc(testPodInfo, tt.injectErr)
 
@@ -567,13 +606,13 @@ func TestDefaultErrorFunc_PodAlreadyBound(t *testing.T) {
 	// Need to add testPod to the store.
 	podInformer.Informer().GetStore().Add(testPod)
 
-	queue := internalqueue.NewPriorityQueue(nil, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
+	queue := internalqueue.NewPriorityQueue(nil, informerFactory, internalqueue.WithClock(clock.NewFakeClock(time.Now())))
 	schedulerCache := internalcache.New(30*time.Second, stopCh)
 
 	// Add node to schedulerCache no matter it's deleted in API server or not.
 	schedulerCache.AddNode(&nodeFoo)
 
-	testPodInfo := &framework.QueuedPodInfo{Pod: testPod}
+	testPodInfo := &framework.QueuedPodInfo{PodInfo: framework.NewPodInfo(testPod)}
 	errFunc := MakeDefaultErrorFunc(client, podInformer.Lister(), queue, schedulerCache)
 	errFunc(testPodInfo, fmt.Errorf("binding rejected: timeout"))
 
@@ -625,10 +664,17 @@ func newConfigFactoryWithFrameworkRegistry(
 		StopEverything:           stopCh,
 		registry:                 registry,
 		profiles: []schedulerapi.KubeSchedulerProfile{
-			{SchedulerName: testSchedulerName},
+			{
+				SchedulerName: testSchedulerName,
+				Plugins: &schedulerapi.Plugins{
+					QueueSort: schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "PrioritySort"}}},
+					Bind:      schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultBinder"}}},
+				},
+			},
 		},
 		recorderFactory:  recorderFactory,
 		nodeInfoSnapshot: snapshot,
+		clusterEventMap:  make(map[framework.ClusterEvent]sets.String),
 	}
 }
 

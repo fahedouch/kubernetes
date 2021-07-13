@@ -43,6 +43,7 @@ import (
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager"
+	"k8s.io/apiserver/pkg/endpoints/handlers/finisher"
 	"k8s.io/apiserver/pkg/endpoints/handlers/negotiation"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/features"
@@ -171,6 +172,9 @@ func PatchResource(r rest.Patcher, scope *RequestScope, admit admission.Interfac
 			userInfo,
 		)
 
+		if scope.FieldManager != nil {
+			admit = fieldmanager.NewManagedFieldsValidatingAdmissionController(admit)
+		}
 		mutatingAdmission, _ := admit.(admission.MutationInterface)
 		createAuthorizerAttributes := authorizer.AttributesRecord{
 			User:            userInfo,
@@ -587,7 +591,7 @@ func (p *patcher) patchResource(ctx context.Context, scope *RequestScope) (runti
 		wasCreated = created
 		return updateObject, updateErr
 	}
-	result, err := finishRequest(ctx, func() (runtime.Object, error) {
+	result, err := finisher.FinishRequest(ctx, func() (runtime.Object, error) {
 		result, err := requestFunc()
 		// If the object wasn't committed to storage because it's serialized size was too large,
 		// it is safe to remove managedFields (which can be large) and try again.

@@ -28,6 +28,7 @@ import (
 
 	flowcontrol "k8s.io/api/flowcontrol/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	fcboot "k8s.io/apiserver/pkg/apis/flowcontrol/bootstrap"
@@ -35,6 +36,7 @@ import (
 	fq "k8s.io/apiserver/pkg/util/flowcontrol/fairqueuing"
 	fcfmt "k8s.io/apiserver/pkg/util/flowcontrol/format"
 	"k8s.io/apiserver/pkg/util/flowcontrol/metrics"
+	fcrequest "k8s.io/apiserver/pkg/util/flowcontrol/request"
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	fcclient "k8s.io/client-go/kubernetes/typed/flowcontrol/v1beta1"
@@ -138,7 +140,7 @@ func (cqs *ctlrTestQueueSet) IsIdle() bool {
 	return cqs.countActive == 0
 }
 
-func (cqs *ctlrTestQueueSet) StartRequest(ctx context.Context, hashValue uint64, flowDistinguisher, fsName string, descr1, descr2 interface{}, queueNoteFn fq.QueueNoteFn) (req fq.Request, idle bool) {
+func (cqs *ctlrTestQueueSet) StartRequest(ctx context.Context, width *fcrequest.Width, hashValue uint64, flowDistinguisher, fsName string, descr1, descr2 interface{}, queueNoteFn fq.QueueNoteFn) (req fq.Request, idle bool) {
 	cqs.cts.lock.Lock()
 	defer cqs.cts.lock.Unlock()
 	cqs.countActive++
@@ -251,10 +253,14 @@ func TestConfigConsumer(t *testing.T) {
 				queues:          map[string]*ctlrTestQueueSet{},
 			}
 			ctlr := newTestableController(TestableConfig{
+				Name:                   "Controller",
+				Clock:                  clock.RealClock{},
+				AsFieldManager:         ConfigConsumerAsFieldManager,
+				FoundToDangling:        func(found bool) bool { return !found },
 				InformerFactory:        informerFactory,
 				FlowcontrolClient:      flowcontrolClient,
-				ServerConcurrencyLimit: 100,
-				RequestWaitLimit:       time.Minute,
+				ServerConcurrencyLimit: 100,         // server concurrency limit
+				RequestWaitLimit:       time.Minute, // request wait limit
 				ObsPairGenerator:       metrics.PriorityLevelConcurrencyObserverPairGenerator,
 				QueueSetFactory:        cts,
 			})
@@ -378,12 +384,16 @@ func TestAPFControllerWithGracefulShutdown(t *testing.T) {
 		queues:          map[string]*ctlrTestQueueSet{},
 	}
 	controller := newTestableController(TestableConfig{
-		informerFactory,
-		flowcontrolClient,
-		100,
-		time.Minute,
-		metrics.PriorityLevelConcurrencyObserverPairGenerator,
-		cts,
+		Name:                   "Controller",
+		Clock:                  clock.RealClock{},
+		AsFieldManager:         ConfigConsumerAsFieldManager,
+		FoundToDangling:        func(found bool) bool { return !found },
+		InformerFactory:        informerFactory,
+		FlowcontrolClient:      flowcontrolClient,
+		ServerConcurrencyLimit: 100,
+		RequestWaitLimit:       time.Minute,
+		ObsPairGenerator:       metrics.PriorityLevelConcurrencyObserverPairGenerator,
+		QueueSetFactory:        cts,
 	})
 
 	stopCh, controllerCompletedCh := make(chan struct{}), make(chan struct{})

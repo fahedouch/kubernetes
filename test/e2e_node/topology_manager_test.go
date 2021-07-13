@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	testutils "k8s.io/kubernetes/test/utils"
@@ -89,13 +90,17 @@ func detectCoresPerSocket() int {
 	return coreCount
 }
 
-func detectSRIOVDevices() int {
+func countSRIOVDevices() (int, error) {
 	outData, err := exec.Command("/bin/sh", "-c", "ls /sys/bus/pci/devices/*/physfn | wc -w").Output()
-	framework.ExpectNoError(err)
+	if err != nil {
+		return -1, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(outData)))
+}
 
-	devCount, err := strconv.Atoi(strings.TrimSpace(string(outData)))
+func detectSRIOVDevices() int {
+	devCount, err := countSRIOVDevices()
 	framework.ExpectNoError(err)
-
 	return devCount
 }
 
@@ -367,7 +372,7 @@ func runTopologyManagerPolicySuiteTests(f *framework.Framework) {
 	runNonGuPodTest(f, cpuCap)
 
 	ginkgo.By("running a Gu pod")
-	runGuPodTest(f)
+	runGuPodTest(f, 1)
 
 	ginkgo.By("running multiple Gu and non-Gu pods")
 	runMultipleGuNonGuPods(f, cpuCap, cpuAlloc)
@@ -387,6 +392,11 @@ func runTopologyManagerPolicySuiteTests(f *framework.Framework) {
 	runMultipleGuPods(f)
 }
 
+// waitForAllContainerRemoval waits until all the containers on a given pod are really gone.
+// This is needed by the e2e tests which involve exclusive resource allocation (cpu, topology manager; podresources; etc.)
+// In these cases, we need to make sure the tests clean up after themselves to make sure each test runs in
+// a pristine environment. The only way known so far to do that is to introduce this wait.
+// Worth noting, however, that this makes the test runtime much bigger.
 func waitForAllContainerRemoval(podName, podNS string) {
 	rs, _, err := getCRIClient()
 	framework.ExpectNoError(err)
@@ -405,7 +415,7 @@ func waitForAllContainerRemoval(podName, podNS string) {
 }
 
 func runTopologyManagerPositiveTest(f *framework.Framework, numPods int, ctnAttrs, initCtnAttrs []tmCtnAttribute, envInfo *testEnvInfo) {
-	var pods []*v1.Pod
+	podMap := make(map[string]*v1.Pod)
 
 	for podID := 0; podID < numPods; podID++ {
 		podName := fmt.Sprintf("gu-pod-%d", podID)
@@ -413,30 +423,39 @@ func runTopologyManagerPositiveTest(f *framework.Framework, numPods int, ctnAttr
 		pod := makeTopologyManagerTestPod(podName, ctnAttrs, initCtnAttrs)
 		pod = f.PodClient().CreateSync(pod)
 		framework.Logf("created pod %s", podName)
-		pods = append(pods, pod)
+		podMap[podName] = pod
 	}
 
 	// per https://github.com/kubernetes/enhancements/blob/master/keps/sig-node/693-topology-manager/README.md#multi-numa-systems-tests
 	// we can do a menaingful validation only when using the single-numa node policy
 	if envInfo.policy == topologymanager.PolicySingleNumaNode {
-		for podID := 0; podID < numPods; podID++ {
-			validatePodAlignment(f, pods[podID], envInfo)
+		for _, pod := range podMap {
+			validatePodAlignment(f, pod, envInfo)
 		}
 		if envInfo.scope == podScopeTopology {
-			for podID := 0; podID < numPods; podID++ {
-				err := validatePodAlignmentWithPodScope(f, pods[podID], envInfo)
+			for _, pod := range podMap {
+				err := validatePodAlignmentWithPodScope(f, pod, envInfo)
 				framework.ExpectNoError(err)
 			}
 		}
 	}
 
-	for podID := 0; podID < numPods; podID++ {
-		pod := pods[podID]
-		framework.Logf("deleting the pod %s/%s and waiting for container removal",
-			pod.Namespace, pod.Name)
-		deletePods(f, []string{pod.Name})
-		waitForAllContainerRemoval(pod.Name, pod.Namespace)
+	deletePodsAsync(f, podMap)
+}
+
+func deletePodsAsync(f *framework.Framework, podMap map[string]*v1.Pod) {
+	var wg sync.WaitGroup
+	for _, pod := range podMap {
+		wg.Add(1)
+		go func(podNS, podName string) {
+			defer ginkgo.GinkgoRecover()
+			defer wg.Done()
+
+			deletePodSyncByName(f, podName)
+			waitForAllContainerRemoval(podName, podNS)
+		}(pod.Namespace, pod.Name)
 	}
+	wg.Wait()
 }
 
 func runTopologyManagerNegativeTest(f *framework.Framework, ctnAttrs, initCtnAttrs []tmCtnAttribute, envInfo *testEnvInfo) {
@@ -462,7 +481,7 @@ func runTopologyManagerNegativeTest(f *framework.Framework, ctnAttrs, initCtnAtt
 		framework.Failf("pod %s failed for wrong reason: %q", pod.Name, pod.Status.Reason)
 	}
 
-	deletePods(f, []string{pod.Name})
+	deletePodSyncByName(f, pod.Name)
 }
 
 func isTopologyAffinityError(pod *v1.Pod) bool {
@@ -565,7 +584,7 @@ func teardownSRIOVConfigOrFail(f *framework.Framework, sd *sriovData) {
 	ginkgo.By(fmt.Sprintf("Delete SRIOV device plugin pod %s/%s", sd.pod.Namespace, sd.pod.Name))
 	err = f.ClientSet.CoreV1().Pods(sd.pod.Namespace).Delete(context.TODO(), sd.pod.Name, deleteOptions)
 	framework.ExpectNoError(err)
-	waitForContainerRemoval(sd.pod.Spec.Containers[0].Name, sd.pod.Name, sd.pod.Namespace)
+	waitForAllContainerRemoval(sd.pod.Name, sd.pod.Namespace)
 
 	ginkgo.By(fmt.Sprintf("Deleting configMap %v/%v", metav1.NamespaceSystem, sd.configMap.Name))
 	err = f.ClientSet.CoreV1().ConfigMaps(metav1.NamespaceSystem).Delete(context.TODO(), sd.configMap.Name, deleteOptions)
@@ -577,12 +596,11 @@ func teardownSRIOVConfigOrFail(f *framework.Framework, sd *sriovData) {
 }
 
 func runTMScopeResourceAlignmentTestSuite(f *framework.Framework, configMap *v1.ConfigMap, reservedSystemCPUs, policy string, numaNodes, coreCount int) {
-	threadsPerCore := 1
-	if isHTEnabled() {
-		threadsPerCore = 2
-	}
+	threadsPerCore := getSMTLevel()
 	sd := setupSRIOVConfigOrFail(f, configMap)
 	var ctnAttrs, initCtnAttrs []tmCtnAttribute
+
+	waitForSRIOVResources(f, sd)
 
 	envInfo := &testEnvInfo{
 		numaNodes:         numaNodes,
@@ -678,10 +696,7 @@ func runTMScopeResourceAlignmentTestSuite(f *framework.Framework, configMap *v1.
 }
 
 func runTopologyManagerNodeAlignmentSuiteTests(f *framework.Framework, sd *sriovData, reservedSystemCPUs, policy string, numaNodes, coreCount int) {
-	threadsPerCore := 1
-	if isHTEnabled() {
-		threadsPerCore = 2
-	}
+	threadsPerCore := getSMTLevel()
 
 	waitForSRIOVResources(f, sd)
 
@@ -880,11 +895,6 @@ func runTopologyManagerTests(f *framework.Framework) {
 			// Run the tests
 			runTopologyManagerPolicySuiteTests(f)
 		}
-		// restore kubelet config
-		setOldKubeletConfig(f, oldCfg)
-
-		// Delete state file to allow repeated runs
-		deleteStateFile()
 	})
 
 	ginkgo.It("run Topology Manager node alignment test suite", func() {
@@ -922,12 +932,6 @@ func runTopologyManagerTests(f *framework.Framework) {
 
 			runTopologyManagerNodeAlignmentSuiteTests(f, sd, reservedSystemCPUs, policy, numaNodes, coreCount)
 		}
-
-		// restore kubelet config
-		setOldKubeletConfig(f, oldCfg)
-
-		// Delete state file to allow repeated runs
-		deleteStateFile()
 	})
 
 	ginkgo.It("run the Topology Manager pod scope alignment test suite", func() {
@@ -956,9 +960,11 @@ func runTopologyManagerTests(f *framework.Framework) {
 		reservedSystemCPUs := configureTopologyManagerInKubelet(f, oldCfg, policy, scope, configMap, numaNodes)
 
 		runTMScopeResourceAlignmentTestSuite(f, configMap, reservedSystemCPUs, policy, numaNodes, coreCount)
+	})
 
+	ginkgo.AfterEach(func() {
+		// restore kubelet config
 		setOldKubeletConfig(f, oldCfg)
-		deleteStateFile()
 	})
 }
 
@@ -969,5 +975,4 @@ var _ = SIGDescribe("Topology Manager [Serial] [Feature:TopologyManager][NodeFea
 	ginkgo.Context("With kubeconfig updated to static CPU Manager policy run the Topology Manager tests", func() {
 		runTopologyManagerTests(f)
 	})
-
 })

@@ -115,7 +115,7 @@ func (t *volumeModeTestSuite) DefineTests(driver storageframework.TestDriver, pa
 
 		// Now do the more expensive test initialization.
 		l.config, l.driverCleanup = driver.PrepareTest(f)
-		l.migrationCheck = newMigrationOpCheck(f.ClientSet, dInfo.InTreePluginName)
+		l.migrationCheck = newMigrationOpCheck(f.ClientSet, f.ClientConfig(), dInfo.InTreePluginName)
 	}
 
 	// manualInit initializes l.VolumeResource without creating the PV & PVC objects.
@@ -219,9 +219,9 @@ func (t *volumeModeTestSuite) DefineTests(driver storageframework.TestDriver, pa
 				podConfig := e2epod.Config{
 					NS:            l.ns.Name,
 					PVCs:          []*v1.PersistentVolumeClaim{l.Pvc},
-					SeLinuxLabel:  e2evolume.GetLinuxLabel(),
+					SeLinuxLabel:  e2epod.GetLinuxLabel(),
 					NodeSelection: l.config.ClientNodeSelection,
-					ImageID:       e2evolume.GetDefaultTestImageID(),
+					ImageID:       e2epod.GetDefaultTestImageID(),
 				}
 				pod, err := e2epod.MakeSecPod(&podConfig)
 				framework.ExpectNoError(err, "Failed to create pod")
@@ -305,8 +305,8 @@ func (t *volumeModeTestSuite) DefineTests(driver storageframework.TestDriver, pa
 		podConfig := e2epod.Config{
 			NS:           l.ns.Name,
 			PVCs:         []*v1.PersistentVolumeClaim{l.Pvc},
-			SeLinuxLabel: e2evolume.GetLinuxLabel(),
-			ImageID:      e2evolume.GetDefaultTestImageID(),
+			SeLinuxLabel: e2epod.GetLinuxLabel(),
+			ImageID:      e2epod.GetDefaultTestImageID(),
 		}
 		pod, err := e2epod.MakeSecPod(&podConfig)
 		framework.ExpectNoError(err)
@@ -362,8 +362,8 @@ func (t *volumeModeTestSuite) DefineTests(driver storageframework.TestDriver, pa
 		podConfig := e2epod.Config{
 			NS:           l.ns.Name,
 			PVCs:         []*v1.PersistentVolumeClaim{l.Pvc},
-			SeLinuxLabel: e2evolume.GetLinuxLabel(),
-			ImageID:      e2evolume.GetDefaultTestImageID(),
+			SeLinuxLabel: e2epod.GetLinuxLabel(),
+			ImageID:      e2epod.GetDefaultTestImageID(),
 		}
 		pod, err := e2epod.MakeSecPod(&podConfig)
 		framework.ExpectNoError(err)

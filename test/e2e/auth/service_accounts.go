@@ -735,7 +735,6 @@ var _ = SIGDescribe("ServiceAccounts", func() {
 					Image: imageutils.GetE2EImage(imageutils.Agnhost),
 					Args: []string{
 						"test-service-account-issuer-discovery",
-						"--in-cluster-discovery",
 						"--token-path", path.Join(tokenPath, tokenName),
 						"--audience", audience,
 					},
@@ -875,7 +874,15 @@ var _ = SIGDescribe("ServiceAccounts", func() {
 		framework.ExpectEqual(eventFound, true, "failed to find %v event", watch.Deleted)
 	})
 
-	ginkgo.It("should guarantee kube-root-ca.crt exist in any namespace", func() {
+	/*
+		Release: v1.21
+		Testname: RootCA ConfigMap test
+		Description: Ensure every namespace exist a ConfigMap for root ca cert.
+			1. Created automatically
+			2. Recreated if deleted
+			3. Reconciled if modified
+	*/
+	framework.ConformanceIt("should guarantee kube-root-ca.crt exist in any namespace", func() {
 		const rootCAConfigMapName = "kube-root-ca.crt"
 
 		framework.ExpectNoError(wait.PollImmediate(500*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {

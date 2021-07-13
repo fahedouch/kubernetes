@@ -17,12 +17,12 @@ limitations under the License.
 package reconciler
 
 import (
+	"crypto/md5"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
 
 	v1 "k8s.io/api/core/v1"
@@ -1094,6 +1094,8 @@ func Test_Run_Positive_VolumeFSResizeControllerAttachEnabled(t *testing.T) {
 				},
 			}
 
+			// deep copy before reconciler runs to avoid data race.
+			pvWithSize := pv.DeepCopy()
 			volumePluginMgr, fakePlugin := volumetesting.GetTestKubeletVolumePluginMgr(t)
 			dsw := cache.NewDesiredStateOfWorld(volumePluginMgr)
 			asw := cache.NewActualStateOfWorld(nodeName, volumePluginMgr)
@@ -1138,8 +1140,8 @@ func Test_Run_Positive_VolumeFSResizeControllerAttachEnabled(t *testing.T) {
 			// Start the reconciler to fill ASW.
 			stopChan, stoppedChan := make(chan struct{}), make(chan struct{})
 			go func() {
+				defer close(stoppedChan)
 				reconciler.Run(stopChan)
-				close(stoppedChan)
 			}()
 			waitForMount(t, fakePlugin, volumeName, asw)
 			// Stop the reconciler.
@@ -1147,8 +1149,8 @@ func Test_Run_Positive_VolumeFSResizeControllerAttachEnabled(t *testing.T) {
 			<-stoppedChan
 
 			// Simulate what DSOWP does
-			pv.Spec.Capacity[v1.ResourceStorage] = tc.newPVSize
-			volumeSpec = &volume.Spec{PersistentVolume: pv}
+			pvWithSize.Spec.Capacity[v1.ResourceStorage] = tc.newPVSize
+			volumeSpec = &volume.Spec{PersistentVolume: pvWithSize}
 			dsw.AddPodToVolume(podName, pod, volumeSpec, volumeSpec.Name(), "" /* volumeGidValue */)
 			// mark volume as resize required
 			asw.MarkFSResizeRequired(volumeName, podName)
@@ -1222,11 +1224,17 @@ func Test_UncertainDeviceGlobalMounts(t *testing.T) {
 		},
 	}
 
-	for _, mode := range []v1.PersistentVolumeMode{v1.PersistentVolumeBlock, v1.PersistentVolumeFilesystem} {
-		for _, tc := range tests {
-			testName := fmt.Sprintf("%s [%s]", tc.name, mode)
-			t.Run(testName+"[", func(t *testing.T) {
+	modes := []v1.PersistentVolumeMode{v1.PersistentVolumeBlock, v1.PersistentVolumeFilesystem}
 
+	for modeIndex := range modes {
+		for tcIndex := range tests {
+			mode := modes[modeIndex]
+			tc := tests[tcIndex]
+			testName := fmt.Sprintf("%s [%s]", tc.name, mode)
+			uniqueTestString := fmt.Sprintf("global-mount-%s", testName)
+			uniquePodDir := fmt.Sprintf("%s-%x", kubeletPodsDir, md5.Sum([]byte(uniqueTestString)))
+			t.Run(testName+"[", func(t *testing.T) {
+				t.Parallel()
 				pv := &v1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: tc.volumeName,
@@ -1297,7 +1305,7 @@ func Test_UncertainDeviceGlobalMounts(t *testing.T) {
 					&mount.FakeMounter{},
 					hostutil.NewFakeHostUtil(nil),
 					volumePluginMgr,
-					kubeletPodsDir)
+					uniquePodDir)
 				volumeSpec := &volume.Spec{PersistentVolume: pv}
 				podName := util.GetUniquePodName(pod)
 				volumeName, err := dsw.AddPodToVolume(
@@ -1402,11 +1410,17 @@ func Test_UncertainVolumeMountState(t *testing.T) {
 			supportRemount:         true,
 		},
 	}
+	modes := []v1.PersistentVolumeMode{v1.PersistentVolumeBlock, v1.PersistentVolumeFilesystem}
 
-	for _, mode := range []v1.PersistentVolumeMode{v1.PersistentVolumeBlock, v1.PersistentVolumeFilesystem} {
-		for _, tc := range tests {
+	for modeIndex := range modes {
+		for tcIndex := range tests {
+			mode := modes[modeIndex]
+			tc := tests[tcIndex]
 			testName := fmt.Sprintf("%s [%s]", tc.name, mode)
+			uniqueTestString := fmt.Sprintf("local-mount-%s", testName)
+			uniquePodDir := fmt.Sprintf("%s-%x", kubeletPodsDir, md5.Sum([]byte(uniqueTestString)))
 			t.Run(testName, func(t *testing.T) {
+				t.Parallel()
 				pv := &v1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: tc.volumeName,
@@ -1476,7 +1490,7 @@ func Test_UncertainVolumeMountState(t *testing.T) {
 					&mount.FakeMounter{},
 					hostutil.NewFakeHostUtil(nil),
 					volumePluginMgr,
-					kubeletPodsDir)
+					uniquePodDir)
 				volumeSpec := &volume.Spec{PersistentVolume: pv}
 				podName := util.GetUniquePodName(pod)
 				volumeName, err := dsw.AddPodToVolume(
@@ -1494,6 +1508,9 @@ func Test_UncertainVolumeMountState(t *testing.T) {
 					close(stoppedChan)
 				}()
 				waitForVolumeToExistInASW(t, volumeName, asw)
+				// all of these tests rely on device to be globally mounted and hence waiting for global
+				// mount ensures that unmountDevice is called as expected.
+				waitForGlobalMount(t, volumeName, asw)
 				if tc.volumeName == volumetesting.TimeoutAndFailOnSetupVolumeName {
 					// Wait upto 10s for reconciler to catchup
 					time.Sleep(reconcilerSyncWaitDuration)
@@ -1567,6 +1584,26 @@ func waitForUncertainGlobalMount(t *testing.T, volumeName v1.UniqueVolumeName, a
 
 	if err != nil {
 		t.Fatalf("expected volumes %s to be mounted in uncertain state globally", volumeName)
+	}
+}
+
+func waitForGlobalMount(t *testing.T, volumeName v1.UniqueVolumeName, asw cache.ActualStateOfWorld) {
+	// check if volume is globally mounted
+	err := retryWithExponentialBackOff(
+		testOperationBackOffDuration,
+		func() (bool, error) {
+			mountedVolumes := asw.GetGloballyMountedVolumes()
+			for _, v := range mountedVolumes {
+				if v.VolumeName == volumeName {
+					return true, nil
+				}
+			}
+			return false, nil
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("expected volume devices %s to be mounted globally", volumeName)
 	}
 }
 
@@ -1771,6 +1808,8 @@ func Test_Run_Positive_VolumeMountControllerAttachEnabledRace(t *testing.T) {
 
 	// 1. Add a volume to DSW and wait until it's mounted
 	volumeSpec := &volume.Spec{Volume: &pod.Spec.Volumes[0]}
+	// copy before reconciler runs to avoid data race.
+	volumeSpecCopy := &volume.Spec{Volume: &pod.Spec.Volumes[0]}
 	podName := util.GetUniquePodName(pod)
 	generatedVolumeName, err := dsw.AddPodToVolume(
 		podName, pod, volumeSpec, volumeSpec.Name(), "" /* volumeGidValue */)
@@ -1795,9 +1834,9 @@ func Test_Run_Positive_VolumeMountControllerAttachEnabledRace(t *testing.T) {
 	fakePlugin.UnmountDeviceHook = func(mountPath string) error {
 		// Act:
 		// 3. While a volume is being unmounted, add it back to the desired state of world
-		klog.Infof("UnmountDevice called")
+		t.Logf("UnmountDevice called")
 		generatedVolumeName, err = dsw.AddPodToVolume(
-			podName, pod, volumeSpec, volumeSpec.Name(), "" /* volumeGidValue */)
+			podName, pod, volumeSpecCopy, volumeSpec.Name(), "" /* volumeGidValue */)
 		dsw.MarkVolumesReportedInUse([]v1.UniqueVolumeName{generatedVolumeName})
 		return nil
 	}

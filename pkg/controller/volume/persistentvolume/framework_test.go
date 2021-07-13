@@ -200,18 +200,18 @@ func checkEvents(t *testing.T, expectedEvents []string, ctrl *PersistentVolumeCo
 	for i, expected := range expectedEvents {
 		if len(gotEvents) <= i {
 			t.Errorf("Event %q not emitted", expected)
-			err = fmt.Errorf("Events do not match")
+			err = fmt.Errorf("events do not match")
 			continue
 		}
 		received := gotEvents[i]
 		if !strings.HasPrefix(received, expected) {
 			t.Errorf("Unexpected event received, expected %q, got %q", expected, received)
-			err = fmt.Errorf("Events do not match")
+			err = fmt.Errorf("events do not match")
 		}
 	}
 	for i := len(expectedEvents); i < len(gotEvents); i++ {
 		t.Errorf("Unexpected event received: %q", gotEvents[i])
-		err = fmt.Errorf("Events do not match")
+		err = fmt.Errorf("events do not match")
 	}
 	return err
 }
@@ -443,6 +443,15 @@ func claimWithAnnotation(name, value string, claims []*v1.PersistentVolumeClaim)
 	return claims
 }
 
+func claimWithDataSource(name, kind, apiGroup string, claims []*v1.PersistentVolumeClaim) []*v1.PersistentVolumeClaim {
+	claims[0].Spec.DataSource = &v1.TypedLocalObjectReference{
+		Name:     name,
+		Kind:     kind,
+		APIGroup: &apiGroup,
+	}
+	return claims
+}
+
 func annotateClaim(claim *v1.PersistentVolumeClaim, ann map[string]string) *v1.PersistentVolumeClaim {
 	if claim.Annotations == nil {
 		claim.Annotations = map[string]string{}
@@ -514,6 +523,7 @@ var (
 	classUnsupportedMountOptions string = "unsupported-mountoptions"
 	classLarge                   string = "large"
 	classWait                    string = "wait"
+	classCSI                     string = "csi"
 
 	modeWait = storage.VolumeBindingWaitForFirstConsumer
 )

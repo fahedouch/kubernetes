@@ -79,6 +79,7 @@ func TestRunOnce(t *testing.T) {
 		nodeLister:       testNodeLister{},
 		statusManager:    status.NewManager(nil, podManager, &statustest.FakePodDeletionSafetyProvider{}),
 		podManager:       podManager,
+		podWorkers:       &fakePodWorkers{},
 		os:               &containertest.FakeOS{},
 		containerRuntime: fakeRuntime,
 		reasonCache:      NewReasonCache(),
@@ -101,7 +102,7 @@ func TestRunOnce(t *testing.T) {
 		true,
 		kb.nodeName,
 		kb.podManager,
-		kb.statusManager,
+		kb.podWorkers,
 		kb.kubeClient,
 		kb.volumePluginMgr,
 		fakeRuntime,
@@ -115,14 +116,14 @@ func TestRunOnce(t *testing.T) {
 
 	// TODO: Factor out "stats.Provider" from Kubelet so we don't have a cyclic dependency
 	volumeStatsAggPeriod := time.Second * 10
-	kb.resourceAnalyzer = stats.NewResourceAnalyzer(kb, volumeStatsAggPeriod)
+	kb.resourceAnalyzer = stats.NewResourceAnalyzer(kb, volumeStatsAggPeriod, kb.recorder)
 	nodeRef := &v1.ObjectReference{
 		Kind:      "Node",
 		Name:      string(kb.nodeName),
 		UID:       types.UID(kb.nodeName),
 		Namespace: "",
 	}
-	fakeKillPodFunc := func(pod *v1.Pod, podStatus v1.PodStatus, gracePeriodOverride *int64) error {
+	fakeKillPodFunc := func(pod *v1.Pod, evict bool, gracePeriodOverride *int64, fn func(*v1.PodStatus)) error {
 		return nil
 	}
 	fakeMirrodPodFunc := func(*v1.Pod) (*v1.Pod, bool) { return nil, false }

@@ -22,7 +22,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/pkg/errors"
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/images"
+	"k8s.io/kubernetes/cmd/kubeadm/app/preflight"
 
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
@@ -34,10 +37,7 @@ import (
 	"k8s.io/klog/v2"
 	utilpointer "k8s.io/utils/pointer"
 
-	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/kubernetes/cmd/kubeadm/app/images"
-	"k8s.io/kubernetes/cmd/kubeadm/app/preflight"
+	"github.com/pkg/errors"
 )
 
 // healthCheck is a helper struct for easily performing healthchecks against the cluster and printing the output
@@ -126,7 +126,11 @@ func createJob(client clientset.Interface, cfg *kubeadmapi.ClusterConfiguration)
 					},
 					Tolerations: []v1.Toleration{
 						{
-							Key:    "node-role.kubernetes.io/master",
+							Key:    constants.LabelNodeRoleOldControlPlane,
+							Effect: v1.TaintEffectNoSchedule,
+						},
+						{
+							Key:    constants.LabelNodeRoleControlPlane,
 							Effect: v1.TaintEffectNoSchedule,
 						},
 					},

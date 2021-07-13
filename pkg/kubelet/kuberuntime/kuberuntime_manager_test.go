@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -58,7 +59,10 @@ func customTestRuntimeManager(keyring *credentialprovider.BasicDockerKeyring) (*
 	// Only an empty machineInfo is needed here, because in unit test all containers are besteffort,
 	// data in machineInfo is not used. If burstable containers are used in unit test in the future,
 	// we may want to set memory capacity.
-	machineInfo := &cadvisorapi.MachineInfo{}
+	memoryCapacityQuantity := resource.MustParse(fakeNodeAllocatableMemory)
+	machineInfo := &cadvisorapi.MachineInfo{
+		MemoryCapacity: uint64(memoryCapacityQuantity.Value()),
+	}
 	osInterface := &containertest.FakeOS{}
 	manager, err := newFakeKubeRuntimeManager(fakeRuntimeService, fakeImageService, machineInfo, osInterface, &containertest.FakeRuntimeHelper{}, keyring)
 	return fakeRuntimeService, fakeImageService, manager, err
@@ -66,10 +70,12 @@ func customTestRuntimeManager(keyring *credentialprovider.BasicDockerKeyring) (*
 
 // sandboxTemplate is a sandbox template to create fake sandbox.
 type sandboxTemplate struct {
-	pod       *v1.Pod
-	attempt   uint32
-	createdAt int64
-	state     runtimeapi.PodSandboxState
+	pod         *v1.Pod
+	attempt     uint32
+	createdAt   int64
+	state       runtimeapi.PodSandboxState
+	running     bool
+	terminating bool
 }
 
 // containerTemplate is a container template to create fake container.
@@ -1002,9 +1008,10 @@ func getKillMapWithInitContainers(pod *v1.Pod, status *kubecontainer.PodStatus, 
 
 func verifyActions(t *testing.T, expected, actual *podActions, desc string) {
 	if actual.ContainersToKill != nil {
-		// Clear the message field since we don't need to verify the message.
+		// Clear the message and reason fields since we don't need to verify them.
 		for k, info := range actual.ContainersToKill {
 			info.message = ""
+			info.reason = ""
 			actual.ContainersToKill[k] = info
 		}
 	}
@@ -1370,6 +1377,42 @@ func TestComputePodActionsWithInitAndEphemeralContainers(t *testing.T) {
 		actions := m.computePodActions(pod, status)
 		verifyActions(t, &test.actions, &actions, desc)
 	}
+}
+
+func TestSyncPodWithSandboxAndDeletedPod(t *testing.T) {
+	fakeRuntime, _, m, err := createTestRuntimeManager()
+	assert.NoError(t, err)
+	fakeRuntime.ErrorOnSandboxCreate = true
+
+	containers := []v1.Container{
+		{
+			Name:            "foo1",
+			Image:           "busybox",
+			ImagePullPolicy: v1.PullIfNotPresent,
+		},
+	}
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:       "12345678",
+			Name:      "foo",
+			Namespace: "new",
+		},
+		Spec: v1.PodSpec{
+			Containers: containers,
+		},
+	}
+
+	backOff := flowcontrol.NewBackOff(time.Second, time.Minute)
+	m.podStateProvider.(*fakePodStateProvider).removed = map[types.UID]struct{}{pod.UID: {}}
+
+	// GetPodStatus and the following SyncPod will not return errors in the
+	// case where the pod has been deleted. We are not adding any pods into
+	// the fakePodProvider so they are 'deleted'.
+	podStatus, err := m.GetPodStatus(pod.UID, pod.Name, pod.Namespace)
+	assert.NoError(t, err)
+	result := m.SyncPod(pod, podStatus, []v1.Secret{}, backOff)
+	// This will return an error if the pod has _not_ been deleted.
+	assert.NoError(t, result.Error())
 }
 
 func makeBasePodAndStatusWithInitAndEphemeralContainers() (*v1.Pod, *kubecontainer.PodStatus) {

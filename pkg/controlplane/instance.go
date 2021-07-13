@@ -38,12 +38,12 @@ import (
 	autoscalingapiv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	batchapiv1 "k8s.io/api/batch/v1"
 	batchapiv1beta1 "k8s.io/api/batch/v1beta1"
-	batchapiv2alpha1 "k8s.io/api/batch/v2alpha1"
 	certificatesapiv1 "k8s.io/api/certificates/v1"
 	certificatesapiv1beta1 "k8s.io/api/certificates/v1beta1"
 	coordinationapiv1 "k8s.io/api/coordination/v1"
 	coordinationapiv1beta1 "k8s.io/api/coordination/v1beta1"
 	apiv1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
 	eventsv1 "k8s.io/api/events/v1"
 	eventsv1beta1 "k8s.io/api/events/v1beta1"
@@ -54,6 +54,7 @@ import (
 	nodev1 "k8s.io/api/node/v1"
 	nodev1alpha1 "k8s.io/api/node/v1alpha1"
 	nodev1beta1 "k8s.io/api/node/v1beta1"
+	policyapiv1 "k8s.io/api/policy/v1"
 	policyapiv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	rbacv1alpha1 "k8s.io/api/rbac/v1alpha1"
@@ -74,15 +75,13 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
-	"k8s.io/apiserver/pkg/server/healthz"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
 	storagefactory "k8s.io/apiserver/pkg/storage/storagebackend/factory"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
-	discoveryclient "k8s.io/client-go/kubernetes/typed/discovery/v1beta1"
-	"k8s.io/component-base/version"
+	discoveryclient "k8s.io/client-go/kubernetes/typed/discovery/v1"
 	"k8s.io/component-helpers/apimachinery/lease"
 	"k8s.io/klog/v2"
 	api "k8s.io/kubernetes/pkg/apis/core"
@@ -90,8 +89,6 @@ import (
 	"k8s.io/kubernetes/pkg/controlplane/controller/apiserverleasegc"
 	"k8s.io/kubernetes/pkg/controlplane/controller/clusterauthenticationtrust"
 	"k8s.io/kubernetes/pkg/controlplane/reconcilers"
-	"k8s.io/kubernetes/pkg/controlplane/tunneler"
-	"k8s.io/kubernetes/pkg/features"
 	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/routes"
@@ -147,10 +144,8 @@ type ExtraConfig struct {
 	EventTTL                 time.Duration
 	KubeletClientConfig      kubeletclient.KubeletClientConfig
 
-	// Used to start and monitor tunneling
-	Tunneler          tunneler.Tunneler
 	EnableLogsSupport bool
-	ProxyTransport    http.RoundTripper
+	ProxyTransport    *http.Transport
 
 	// Values to build the IP addresses used by discovery
 	// The range of IPs to be assigned to services with type=ClusterIP or greater
@@ -250,10 +245,7 @@ type Instance struct {
 
 func (c *Config) createMasterCountReconciler() reconcilers.EndpointReconciler {
 	endpointClient := corev1client.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
-	var endpointSliceClient discoveryclient.EndpointSlicesGetter
-	if utilfeature.DefaultFeatureGate.Enabled(features.EndpointSlice) {
-		endpointSliceClient = discoveryclient.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
-	}
+	endpointSliceClient := discoveryclient.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
 	endpointsAdapter := reconcilers.NewEndpointsAdapter(endpointClient, endpointSliceClient)
 
 	return reconcilers.NewMasterCountEndpointReconciler(c.ExtraConfig.MasterCount, endpointsAdapter)
@@ -265,10 +257,7 @@ func (c *Config) createNoneReconciler() reconcilers.EndpointReconciler {
 
 func (c *Config) createLeaseReconciler() reconcilers.EndpointReconciler {
 	endpointClient := corev1client.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
-	var endpointSliceClient discoveryclient.EndpointSlicesGetter
-	if utilfeature.DefaultFeatureGate.Enabled(features.EndpointSlice) {
-		endpointSliceClient = discoveryclient.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
-	}
+	endpointSliceClient := discoveryclient.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
 	endpointsAdapter := reconcilers.NewEndpointsAdapter(endpointClient, endpointSliceClient)
 
 	ttl := c.ExtraConfig.MasterEndpointReconcileTTL
@@ -457,10 +446,6 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 		return nil, err
 	}
 
-	if c.ExtraConfig.Tunneler != nil {
-		m.installTunneler(c.ExtraConfig.Tunneler, corev1client.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig).Nodes())
-	}
-
 	m.GenericAPIServer.AddPostStartHookOrDie("start-cluster-authentication-info-controller", func(hookContext genericapiserver.PostStartHookContext) error {
 		kubeClient, err := kubernetes.NewForConfig(hookContext.LoopbackClientConfig)
 		if err != nil {
@@ -470,9 +455,7 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 
 		// prime values and start listeners
 		if m.ClusterAuthenticationInfo.ClientCA != nil {
-			if notifier, ok := m.ClusterAuthenticationInfo.ClientCA.(dynamiccertificates.Notifier); ok {
-				notifier.AddListener(controller)
-			}
+			m.ClusterAuthenticationInfo.ClientCA.AddListener(controller)
 			if controller, ok := m.ClusterAuthenticationInfo.ClientCA.(dynamiccertificates.ControllerRunner); ok {
 				// runonce to be sure that we have a value.
 				if err := controller.RunOnce(); err != nil {
@@ -482,9 +465,7 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 			}
 		}
 		if m.ClusterAuthenticationInfo.RequestHeaderCA != nil {
-			if notifier, ok := m.ClusterAuthenticationInfo.RequestHeaderCA.(dynamiccertificates.Notifier); ok {
-				notifier.AddListener(controller)
-			}
+			m.ClusterAuthenticationInfo.RequestHeaderCA.AddListener(controller)
 			if controller, ok := m.ClusterAuthenticationInfo.RequestHeaderCA.(dynamiccertificates.ControllerRunner); ok {
 				// runonce to be sure that we have a value.
 				if err := controller.RunOnce(); err != nil {
@@ -562,14 +543,6 @@ func (m *Instance) InstallLegacyAPI(c *completedConfig, restOptionsGetter generi
 	return nil
 }
 
-func (m *Instance) installTunneler(nodeTunneler tunneler.Tunneler, nodeClient corev1client.NodeInterface) {
-	nodeTunneler.Run(nodeAddressProvider{nodeClient}.externalAddresses)
-	err := m.GenericAPIServer.AddHealthChecks(healthz.NamedCheck("SSH Tunnel Check", tunneler.TunnelSyncHealthChecker(nodeTunneler)))
-	if err != nil {
-		klog.Errorf("Failed adding ssh tunnel health check %v\n", err)
-	}
-}
-
 // RESTStorageProvider is a factory type for REST storage.
 type RESTStorageProvider interface {
 	GroupName() string
@@ -581,7 +554,7 @@ func (m *Instance) InstallAPIs(apiResourceConfigSource serverstorage.APIResource
 	apiGroupsInfo := []*genericapiserver.APIGroupInfo{}
 
 	// used later in the loop to filter the served resource by those that have expired.
-	resourceExpirationEvaluator, err := newResourceExpirationEvaluator(version.Get())
+	resourceExpirationEvaluator, err := genericapiserver.NewResourceExpirationEvaluator(*m.GenericAPIServer.Version)
 	if err != nil {
 		return err
 	}
@@ -604,7 +577,7 @@ func (m *Instance) InstallAPIs(apiResourceConfigSource serverstorage.APIResource
 		// Remove resources that serving kinds that are removed.
 		// We do this here so that we don't accidentally serve versions without resources or openapi information that for kinds we don't serve.
 		// This is a spot above the construction of individual storage handlers so that no sig accidentally forgets to check.
-		resourceExpirationEvaluator.removeDeletedKinds(groupName, apiGroupInfo.VersionedResourcesStorageMap)
+		resourceExpirationEvaluator.RemoveDeletedKinds(groupName, apiGroupInfo.Scheme, apiGroupInfo.VersionedResourcesStorageMap)
 		if len(apiGroupInfo.VersionedResourcesStorageMap) == 0 {
 			klog.V(1).Infof("Removing API group %v because it is time to stop serving it because it has no versions per APILifecycle.", groupName)
 			continue
@@ -686,6 +659,7 @@ func DefaultAPIResourceConfigSource() *serverstorage.ResourceConfig {
 		certificatesapiv1beta1.SchemeGroupVersion,
 		coordinationapiv1.SchemeGroupVersion,
 		coordinationapiv1beta1.SchemeGroupVersion,
+		discoveryv1.SchemeGroupVersion,
 		discoveryv1beta1.SchemeGroupVersion,
 		eventsv1.SchemeGroupVersion,
 		eventsv1beta1.SchemeGroupVersion,
@@ -694,6 +668,7 @@ func DefaultAPIResourceConfigSource() *serverstorage.ResourceConfig {
 		networkingapiv1beta1.SchemeGroupVersion,
 		nodev1.SchemeGroupVersion,
 		nodev1beta1.SchemeGroupVersion,
+		policyapiv1.SchemeGroupVersion,
 		policyapiv1beta1.SchemeGroupVersion,
 		rbacv1.SchemeGroupVersion,
 		rbacv1beta1.SchemeGroupVersion,
@@ -710,7 +685,6 @@ func DefaultAPIResourceConfigSource() *serverstorage.ResourceConfig {
 	// disable alpha versions explicitly so we have a full list of what's possible to serve
 	ret.DisableVersions(
 		apiserverinternalv1alpha1.SchemeGroupVersion,
-		batchapiv2alpha1.SchemeGroupVersion,
 		nodev1alpha1.SchemeGroupVersion,
 		rbacv1alpha1.SchemeGroupVersion,
 		schedulingv1alpha1.SchemeGroupVersion,

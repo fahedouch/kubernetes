@@ -149,35 +149,33 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding) 
 		},
 	})
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.EndpointSlice) {
-		addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
-			ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "endpointslice-controller"},
-			Rules: []rbacv1.PolicyRule{
-				rbacv1helpers.NewRule("get", "list", "watch").Groups(legacyGroup).Resources("services", "pods", "nodes").RuleOrDie(),
-				// The controller needs to be able to set a service's finalizers to be able to create an EndpointSlice
-				// resource that is owned by the service and sets blockOwnerDeletion=true in its ownerRef.
-				rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("services/finalizers").RuleOrDie(),
-				rbacv1helpers.NewRule("get", "list", "create", "update", "delete").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie(),
-				eventsRule(),
-			},
-		})
+	addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "endpointslice-controller"},
+		Rules: []rbacv1.PolicyRule{
+			rbacv1helpers.NewRule("get", "list", "watch").Groups(legacyGroup).Resources("services", "pods", "nodes").RuleOrDie(),
+			// The controller needs to be able to set a service's finalizers to be able to create an EndpointSlice
+			// resource that is owned by the service and sets blockOwnerDeletion=true in its ownerRef.
+			rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("services/finalizers").RuleOrDie(),
+			rbacv1helpers.NewRule("get", "list", "create", "update", "delete").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie(),
+			eventsRule(),
+		},
+	})
 
-		addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
-			ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "endpointslicemirroring-controller"},
-			Rules: []rbacv1.PolicyRule{
-				rbacv1helpers.NewRule("get", "list", "watch").Groups(legacyGroup).Resources("services", "endpoints").RuleOrDie(),
-				// The controller needs to be able to set a service's finalizers to be able to create an EndpointSlice
-				// resource that is owned by the service and sets blockOwnerDeletion=true in its ownerRef.
-				rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("services/finalizers").RuleOrDie(),
-				// The controller needs to be able to set a service's finalizers to be able to create an EndpointSlice
-				// resource that is owned by the endpoint and sets blockOwnerDeletion=true in its ownerRef.
-				// see https://github.com/openshift/kubernetes/blob/8691466059314c3f7d6dcffcbb76d14596ca716c/pkg/controller/endpointslicemirroring/utils.go#L87-L88
-				rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("endpoints/finalizers").RuleOrDie(),
-				rbacv1helpers.NewRule("get", "list", "create", "update", "delete").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie(),
-				eventsRule(),
-			},
-		})
-	}
+	addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "endpointslicemirroring-controller"},
+		Rules: []rbacv1.PolicyRule{
+			rbacv1helpers.NewRule("get", "list", "watch").Groups(legacyGroup).Resources("services", "endpoints").RuleOrDie(),
+			// The controller needs to be able to set a service's finalizers to be able to create an EndpointSlice
+			// resource that is owned by the service and sets blockOwnerDeletion=true in its ownerRef.
+			rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("services/finalizers").RuleOrDie(),
+			// The controller needs to be able to set a service's finalizers to be able to create an EndpointSlice
+			// resource that is owned by the endpoint and sets blockOwnerDeletion=true in its ownerRef.
+			// see https://github.com/openshift/kubernetes/blob/8691466059314c3f7d6dcffcbb76d14596ca716c/pkg/controller/endpointslicemirroring/utils.go#L87-L88
+			rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("endpoints/finalizers").RuleOrDie(),
+			rbacv1helpers.NewRule("get", "list", "create", "update", "delete").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie(),
+			eventsRule(),
+		},
+	})
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.ExpandPersistentVolumes) {
 		addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
@@ -200,6 +198,7 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding) 
 			ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "ephemeral-volume-controller"},
 			Rules: []rbacv1.PolicyRule{
 				rbacv1helpers.NewRule("get", "list", "watch").Groups(legacyGroup).Resources("pods").RuleOrDie(),
+				rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("pods/finalizers").RuleOrDie(),
 				rbacv1helpers.NewRule("get", "list", "watch", "create").Groups(legacyGroup).Resources("persistentvolumeclaims").RuleOrDie(),
 				eventsRule(),
 			},
@@ -232,7 +231,7 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding) 
 	addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "job-controller"},
 		Rules: []rbacv1.PolicyRule{
-			rbacv1helpers.NewRule("get", "list", "watch", "update").Groups(batchGroup).Resources("jobs").RuleOrDie(),
+			rbacv1helpers.NewRule("get", "list", "watch", "update", "patch").Groups(batchGroup).Resources("jobs").RuleOrDie(),
 			rbacv1helpers.NewRule("update").Groups(batchGroup).Resources("jobs/status").RuleOrDie(),
 			rbacv1helpers.NewRule("update").Groups(batchGroup).Resources("jobs/finalizers").RuleOrDie(),
 			rbacv1helpers.NewRule("list", "watch", "create", "delete", "patch").Groups(legacyGroup).Resources("pods").RuleOrDie(),
@@ -402,16 +401,13 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding) 
 			},
 		})
 	}
-
-	if utilfeature.DefaultFeatureGate.Enabled(features.RootCAConfigMap) {
-		addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
-			ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "root-ca-cert-publisher"},
-			Rules: []rbacv1.PolicyRule{
-				rbacv1helpers.NewRule("create", "update").Groups(legacyGroup).Resources("configmaps").RuleOrDie(),
-				eventsRule(),
-			},
-		})
-	}
+	addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: saRolePrefix + "root-ca-cert-publisher"},
+		Rules: []rbacv1.PolicyRule{
+			rbacv1helpers.NewRule("create", "update").Groups(legacyGroup).Resources("configmaps").RuleOrDie(),
+			eventsRule(),
+		},
+	})
 	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.StorageVersionAPI) &&
 		utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerIdentity) {
 		addControllerRole(&controllerRoles, &controllerRoleBindings, rbacv1.ClusterRole{

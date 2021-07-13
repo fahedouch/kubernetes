@@ -49,28 +49,28 @@ const (
 	timeout                           = time.Second * 10
 )
 
-func setup(t testing.TB) (*httptest.Server, *rest.Config, framework.CloseFunc) {
-	opts := framework.MasterConfigOptions{EtcdOptions: framework.DefaultEtcdOptions()}
+func setup(t testing.TB, maxReadonlyRequestsInFlight, MaxMutatingRequestsInFlight int) (*httptest.Server, *rest.Config, framework.CloseFunc) {
+	opts := framework.ControlPlaneConfigOptions{EtcdOptions: framework.DefaultEtcdOptions()}
 	opts.EtcdOptions.DefaultStorageMediaType = "application/vnd.kubernetes.protobuf"
-	masterConfig := framework.NewIntegrationTestMasterConfigWithOptions(&opts)
+	controlPlaneConfig := framework.NewIntegrationTestControlPlaneConfigWithOptions(&opts)
 	resourceConfig := controlplane.DefaultAPIResourceConfigSource()
 	resourceConfig.EnableVersions(schema.GroupVersion{
 		Group:   "flowcontrol.apiserver.k8s.io",
 		Version: "v1alpha1",
 	})
-	masterConfig.GenericConfig.MaxRequestsInFlight = 1
-	masterConfig.GenericConfig.MaxMutatingRequestsInFlight = 1
-	masterConfig.GenericConfig.OpenAPIConfig = framework.DefaultOpenAPIConfig()
-	masterConfig.ExtraConfig.APIResourceConfigSource = resourceConfig
-	_, s, closeFn := framework.RunAMaster(masterConfig)
+	controlPlaneConfig.GenericConfig.MaxRequestsInFlight = maxReadonlyRequestsInFlight
+	controlPlaneConfig.GenericConfig.MaxMutatingRequestsInFlight = MaxMutatingRequestsInFlight
+	controlPlaneConfig.GenericConfig.OpenAPIConfig = framework.DefaultOpenAPIConfig()
+	controlPlaneConfig.ExtraConfig.APIResourceConfigSource = resourceConfig
+	_, s, closeFn := framework.RunAnAPIServer(controlPlaneConfig)
 
-	return s, masterConfig.GenericConfig.LoopbackClientConfig, closeFn
+	return s, controlPlaneConfig.GenericConfig.LoopbackClientConfig, closeFn
 }
 
 func TestPriorityLevelIsolation(t *testing.T) {
 	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, genericfeatures.APIPriorityAndFairness, true)()
 	// NOTE: disabling the feature should fail the test
-	_, loopbackConfig, closeFn := setup(t)
+	_, loopbackConfig, closeFn := setup(t, 1, 1)
 	defer closeFn()
 
 	loopbackClient := clientset.NewForConfigOrDie(loopbackConfig)

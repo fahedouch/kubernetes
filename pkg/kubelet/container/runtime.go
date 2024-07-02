@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//go:generate mockgen -source=runtime.go -destination=testing/runtime_mock.go -package=testing Runtime
+//go:generate mockery
 package container
 
 import (
@@ -273,6 +273,9 @@ const (
 	// ContainerStateUnknown encompasses all the states that we currently don't care about (like restarting, paused, dead).
 	ContainerStateUnknown State = "unknown"
 )
+
+// ContainerReasonStatusUnknown indicates a container the status of the container cannot be determined.
+const ContainerReasonStatusUnknown string = "ContainerStatusUnknown"
 
 // Container provides the runtime information for a container, such as ID, hash,
 // state of the container.
